@@ -36,6 +36,8 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
 
   test:
     name: Test
@@ -46,10 +48,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Verify the coverage gate script
+        run: ./scripts/coverage_test.sh
       - name: Test with race detector and coverage
         run: go test ./... -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out
-      - name: Report coverage
-        run: go tool cover -func=coverage.out | tail -1
+      - name: Enforce coverage gate
+        run: ./scripts/coverage.sh coverage.out 95.0
       - uses: actions/upload-artifact@v4
         with:
           name: coverage

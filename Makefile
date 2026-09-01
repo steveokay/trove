@@ -6,6 +6,8 @@ GOEXE      := $(shell go env GOEXE)
 BINARY     := $(BIN_DIR)/trove$(GOEXE)
 PKG        := github.com/steveokay/trove
 
+COVERAGE_MIN ?= 95.0
+
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -36,9 +38,17 @@ test: ## Run the test suite with the race detector
 	go test ./... -race -covermode=atomic -coverpkg=./...
 
 .PHONY: cover
-cover: ## Run tests and report total coverage
+cover: ## Run tests and enforce the coverage gate (>=95%)
 	go test ./... -covermode=atomic -coverpkg=./... -coverprofile=coverage.out
-	go tool cover -func=coverage.out | tail -1
+	./scripts/coverage.sh coverage.out $(COVERAGE_MIN)
+
+.PHONY: cover-html
+cover-html: cover ## Open the coverage report in a browser
+	go tool cover -html=coverage.out
+
+.PHONY: cover-selftest
+cover-selftest: ## Verify the coverage gate script itself
+	./scripts/coverage_test.sh
 
 .PHONY: lint
 lint: ## Run go vet and golangci-lint

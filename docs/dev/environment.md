@@ -18,13 +18,33 @@ locally before you push.
 ## Everyday commands
 
 ```bash
-make build        # build bin/trove
-make test         # full suite, race detector on
-make cover        # suite + total coverage number
-make lint         # go vet + golangci-lint
-make test-linux   # full suite inside a Linux container (see below)
-make help         # list every target
+make build            # build bin/trove
+make test             # full suite, race detector on
+make cover            # suite + enforce the >=95% coverage gate
+make cover-html       # browse the coverage report
+make cover-selftest   # verify the gate script itself
+make lint             # go vet + golangci-lint
+make test-linux       # full suite inside a Linux container (see below)
+make help             # list every target
 ```
+
+## The coverage gate
+
+`scripts/coverage.sh` enforces CLAUDE.md §9: **≥95 % line coverage**, measured with
+`-coverpkg=./...`. Only three things leave the denominator — `cmd/*/main.go`,
+`*_mock.go`, and `*.gen.go` — and nothing else may be added without amending §9.
+
+Two details worth knowing:
+
+- Under `-coverpkg=./...` every test binary emits blocks for every package, so the
+  same block appears once per binary. The gate merges blocks by position before
+  totalling; summing raw profile lines would understate coverage badly.
+- Degenerate inputs (missing profile, no data, everything excluded) exit 2 rather
+  than passing. A gate that passes when it cannot measure is worse than no gate.
+
+The script has its own test suite (`make cover-selftest`, run in CI before the gate
+itself) covering the exclusion rules, the threshold boundary, block merging, and each
+degenerate case.
 
 ## Platform differences and how we handle them
 
