@@ -28,7 +28,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-016 | ADR: quota accounting model | todo | Q8 ✓ | Hosted vs cache budgets, soft/hard thresholds, breach behaviour |
 | D-017 | **ADR: RBAC model** | done | Q14 ✓, Q19 ✓, Q20 ✓ | `docs/adr/0001-rbac-model.md` — subjects, groups, roles, bindings, scope grammar, built-in roles |
 | D-018 | **ADR: permission vocabulary** | done | D-017 | `docs/adr/0002-permission-vocabulary.md` — 33 verbs incl. `repo:create`/`repo:configure`, splits justified, verb → operation mapping |
-| D-019 | **ADR: visibility & disclosure policy** | todo | Q18 ✓ | 404/NAME_UNKNOWN decided; enumerated list of every surface needing filtering |
+| D-019 | **ADR: visibility & disclosure policy** | done | Q18 ✓ | `docs/adr/0003-visibility-disclosure.md` — status-code matrix, ten enumerated filtered surfaces |
 | D-020 | ADR: admin API + CLI conventions | todo | Q23 ✓ | Versioning, error format, pagination, auth for the admin API; CLI-as-API-client + `--offline` exceptions |
 | D-021 | ADR: secrets key management | todo | Q21 ✓ | Auto-generated keyfile, AES-256-GCM, rotation command; distinct from blob encryption at rest (Q13) |
 | D-022 | ADR: referrer lifecycle on subject deletion | todo | Q22 ✓ | Cascade decided; untagged reaping provably cannot delete a referrer of a live subject |
