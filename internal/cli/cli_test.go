@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -47,7 +48,7 @@ func TestRunVersion(t *testing.T) {
 			t.Parallel()
 
 			env, out, _ := newEnv()
-			err := Run(env, tt.args)
+			err := Run(context.Background(), env, tt.args)
 
 			if tt.wantErr {
 				if !errors.Is(err, ErrUsage) {
@@ -87,7 +88,7 @@ func TestRunUsageErrors(t *testing.T) {
 			t.Parallel()
 
 			env, _, errOut := newEnv()
-			err := Run(env, tt.args)
+			err := Run(context.Background(), env, tt.args)
 
 			if !errors.Is(err, ErrUsage) {
 				t.Fatalf("err = %v, want ErrUsage", err)
@@ -107,7 +108,7 @@ func TestRunHelp(t *testing.T) {
 			t.Parallel()
 
 			env, out, _ := newEnv()
-			if err := Run(env, []string{arg}); err != nil {
+			if err := Run(context.Background(), env, []string{arg}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			got := out.String()
@@ -123,18 +124,22 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
+// implemented lists commands with real behaviour, which therefore must not be
+// asserted to report "not implemented". Each has its own tests.
+var implemented = map[string]bool{"version": true, "serve": true}
+
 func TestUnimplementedCommandsReportPlainly(t *testing.T) {
 	t.Parallel()
 
 	for _, c := range commands {
-		if c.name == "version" {
+		if implemented[c.name] {
 			continue
 		}
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
 			env, out, _ := newEnv()
-			err := Run(env, []string{c.name})
+			err := Run(context.Background(), env, []string{c.name})
 
 			if err == nil {
 				t.Fatalf("%s returned nil error; unimplemented commands must fail", c.name)

@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,14 +28,14 @@ type Env struct {
 type command struct {
 	name    string
 	summary string
-	run     func(env Env, args []string) error
+	run     func(ctx context.Context, env Env, args []string) error
 }
 
 // commands is the dispatch table. Subcommands are implemented across later
 // tasks; each unimplemented entry reports that plainly rather than pretending
 // to succeed.
 var commands = []command{
-	{"serve", "run the registry server", notImplemented("serve")},
+	{"serve", "run the registry server", runServe},
 	{"migrate", "import content from another registry", notImplemented("migrate")},
 	{"gc", "run garbage collection", notImplemented("gc")},
 	{"verify", "verify stored content against recorded digests", notImplemented("verify")},
@@ -47,8 +48,9 @@ var commands = []command{
 }
 
 // Run dispatches args (without the program name) and returns an error suitable
-// for exit-code mapping by the caller.
-func Run(env Env, args []string) error {
+// for exit-code mapping by the caller. Cancelling ctx asks a long-running
+// command, such as serve, to shut down gracefully.
+func Run(ctx context.Context, env Env, args []string) error {
 	if len(args) == 0 {
 		writeUsage(env.Stderr)
 		return fmt.Errorf("%w: no subcommand given", ErrUsage)
@@ -63,7 +65,7 @@ func Run(env Env, args []string) error {
 
 	for _, c := range commands {
 		if c.name == name {
-			return c.run(env, args[1:])
+			return c.run(ctx, env, args[1:])
 		}
 	}
 
@@ -71,7 +73,7 @@ func Run(env Env, args []string) error {
 	return fmt.Errorf("%w: unknown subcommand %q", ErrUsage, name)
 }
 
-func runVersion(env Env, args []string) error {
+func runVersion(_ context.Context, env Env, args []string) error {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	short := fs.Bool("short", false, "print only the version string")
@@ -88,8 +90,8 @@ func runVersion(env Env, args []string) error {
 	return nil
 }
 
-func notImplemented(name string) func(Env, []string) error {
-	return func(_ Env, _ []string) error {
+func notImplemented(name string) func(context.Context, Env, []string) error {
+	return func(_ context.Context, _ Env, _ []string) error {
 		return fmt.Errorf("subcommand %q is not implemented yet", name)
 	}
 }
