@@ -23,7 +23,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-011 | ADR: repository model — hosted / proxy / group | done | D-017 | `docs/adr/0005-repository-model.md` — prefix routing, pure group resolution, write rules, lifecycle (dep flipped: D-006 now consumes this) |
 | D-012 | ADR: cache semantics | done | Q11 ✓ | `docs/adr/0008-cache-semantics.md` — leases, negative cache, offline modes, single-flight, backoff, eviction defaults |
 | D-013 | ADR: cache eviction vs retention separation | done | D-007, D-011 | `docs/adr/0009-eviction-retention-separation.md` — four walls: types, wiring, imports, schema; proving test defined |
-| D-014 | ADR: event model + webhook delivery | todo | D-006 | Event taxonomy, idempotency key, retry/backoff, signing, permission filtering |
+| D-014 | ADR: event model + webhook delivery | done | D-006 | `docs/adr/0012-events-webhooks.md` — taxonomy, outbox pattern, live authz filtering, SSRF validation, retry/DLQ |
 | D-015 | ADR: pull gating design | todo | Q12 ✓, Q24 ✓ | Enforcement points, digest/referrer bypass closure, `gate:override` break-glass, serve-vs-block while a cache-fill scan is pending |
 | D-016 | ADR: quota accounting model | todo | Q8 ✓ | Hosted vs cache budgets, soft/hard thresholds, breach behaviour |
 | D-017 | **ADR: RBAC model** | done | Q14 ✓, Q19 ✓, Q20 ✓ | `docs/adr/0001-rbac-model.md` — subjects, groups, roles, bindings, scope grammar, built-in roles |
