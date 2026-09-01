@@ -21,6 +21,7 @@ type Store interface {
 	RepositoryStore
 	ContentStore
 	IdentityStore
+	CredentialStore
 
 	// Close releases the store's resources. It is safe to call twice.
 	Close() error
@@ -222,4 +223,75 @@ type IdentityStore interface {
 	// A disabled subject has no effective bindings: disabling must take
 	// effect everywhere at once, not only where someone remembered to check.
 	ListEffectiveBindings(ctx context.Context, subject string) ([]EffectiveBinding, error)
+}
+
+// CredentialStore holds secrets at rest: password verifiers, robot secrets,
+// personal access tokens, and browser sessions. It stores hashes, never
+// plaintext, and enforces expiry on read rather than trusting callers to check
+// afterwards (ADR 0004).
+type CredentialStore interface {
+	// PutUserCredential stores or replaces a user's password verifier.
+	PutUserCredential(ctx context.Context, cred UserCredential) error
+
+	// GetUserCredential returns a user's verifier, or ErrNotFound. Password
+	// verification happens in authn; the store only supplies the hash.
+	GetUserCredential(ctx context.Context, subject string) (UserCredential, error)
+
+	// DeleteUserCredential removes a password verifier, leaving the subject.
+	DeleteUserCredential(ctx context.Context, subject string) error
+
+	// PutRobotCredential stores or replaces a robot's secret digest. The
+	// expiry is mandatory; a robot without one is rejected.
+	PutRobotCredential(ctx context.Context, cred RobotCredential) error
+
+	// GetRobotCredential returns a robot's secret digest, or ErrNotFound if
+	// there is none or it has expired at the given time. Expired and absent
+	// are the same answer on purpose: an authentication path should not
+	// reveal which robots used to exist.
+	GetRobotCredential(ctx context.Context, subject string, now time.Time) (RobotCredential, error)
+
+	// DeleteRobotCredential revokes a robot's secret. The next use fails,
+	// regardless of any token minted while it was valid.
+	DeleteRobotCredential(ctx context.Context, subject string) error
+
+	// CreateAccessToken stores a personal access token.
+	CreateAccessToken(ctx context.Context, token AccessToken) error
+
+	// GetAccessTokenByHash resolves a presented token to its record, or
+	// ErrNotFound if unknown or expired at the given time. Lookup is by hash
+	// because that is all the store holds.
+	GetAccessTokenByHash(ctx context.Context, hash []byte, now time.Time) (AccessToken, error)
+
+	// ListAccessTokens returns a subject's tokens, ordered by name, including
+	// expired ones so an operator can see and clean them up.
+	ListAccessTokens(ctx context.Context, subject string) ([]AccessToken, error)
+
+	// TouchAccessToken records that a token was used.
+	TouchAccessToken(ctx context.Context, id string, at time.Time) error
+
+	// DeleteAccessToken revokes one token by id.
+	DeleteAccessToken(ctx context.Context, id string) error
+
+	// CreateSession stores a browser session.
+	CreateSession(ctx context.Context, session Session) error
+
+	// GetSession returns a live session, or ErrNotFound if unknown or expired
+	// at the given time by either the idle or the absolute bound.
+	GetSession(ctx context.Context, id string, now time.Time) (Session, error)
+
+	// RefreshSession extends a session's idle bound. It cannot extend the
+	// absolute bound: that is what stops a session living forever.
+	RefreshSession(ctx context.Context, id string, idleExpiresAt time.Time) error
+
+	// DeleteSession ends one session.
+	DeleteSession(ctx context.Context, id string) error
+
+	// DeleteSubjectSessions ends every session belonging to a subject. It is
+	// what a password change and a disable both call, so a compromised
+	// session cannot outlive the credential it came from.
+	DeleteSubjectSessions(ctx context.Context, subject string) (int, error)
+
+	// DeleteExpiredSessions removes sessions that expired before the given
+	// time, so the table does not grow without bound.
+	DeleteExpiredSessions(ctx context.Context, before time.Time) (int, error)
 }

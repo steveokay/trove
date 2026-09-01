@@ -58,6 +58,7 @@ func Run(t *testing.T, f Factory) {
 		{"CloseIsIdempotent", testCloseIsIdempotent},
 	}
 	tests = append(tests, identityTests()...)
+	tests = append(tests, credentialTests()...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1067,6 +1068,40 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"ListBindings", func() error { _, err := s.ListBindings(ctx); return err }},
 		{"DeleteBinding", func() error { return s.DeleteBinding(ctx, "b") }},
 		{"ListEffectiveBindings", func() error { _, err := s.ListEffectiveBindings(ctx, "s"); return err }},
+
+		{"PutUserCredential", func() error {
+			return s.PutUserCredential(ctx, meta.UserCredential{Subject: "s", Hash: "h"})
+		}},
+		{"GetUserCredential", func() error { _, err := s.GetUserCredential(ctx, "s"); return err }},
+		{"DeleteUserCredential", func() error { return s.DeleteUserCredential(ctx, "s") }},
+		{"PutRobotCredential", func() error {
+			return s.PutRobotCredential(ctx, meta.RobotCredential{
+				Subject: "s", SecretHash: []byte("h"), ExpiresAt: testTime.Add(time.Hour),
+			})
+		}},
+		{"GetRobotCredential", func() error { _, err := s.GetRobotCredential(ctx, "s", testTime); return err }},
+		{"DeleteRobotCredential", func() error { return s.DeleteRobotCredential(ctx, "s") }},
+		{"CreateAccessToken", func() error {
+			return s.CreateAccessToken(ctx, meta.AccessToken{ID: "t", Subject: "s", TokenHash: []byte("h")})
+		}},
+		{"GetAccessTokenByHash", func() error {
+			_, err := s.GetAccessTokenByHash(ctx, []byte("h"), testTime)
+			return err
+		}},
+		{"ListAccessTokens", func() error { _, err := s.ListAccessTokens(ctx, "s"); return err }},
+		{"TouchAccessToken", func() error { return s.TouchAccessToken(ctx, "t", testTime) }},
+		{"DeleteAccessToken", func() error { return s.DeleteAccessToken(ctx, "t") }},
+		{"CreateSession", func() error {
+			return s.CreateSession(ctx, meta.Session{
+				ID: "x", Subject: "s", CSRFToken: "c",
+				IdleExpiresAt: testTime, AbsoluteExpiresAt: testTime,
+			})
+		}},
+		{"GetSession", func() error { _, err := s.GetSession(ctx, "x", testTime); return err }},
+		{"RefreshSession", func() error { return s.RefreshSession(ctx, "x", testTime) }},
+		{"DeleteSession", func() error { return s.DeleteSession(ctx, "x") }},
+		{"DeleteSubjectSessions", func() error { _, err := s.DeleteSubjectSessions(ctx, "s"); return err }},
+		{"DeleteExpiredSessions", func() error { _, err := s.DeleteExpiredSessions(ctx, testTime); return err }},
 	}
 }
 

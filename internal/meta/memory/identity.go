@@ -141,6 +141,21 @@ func (s *Store) DeleteSubject(ctx context.Context, name string) error {
 		delete(s.groupMembers[group], name)
 	}
 	s.dropBindings(meta.PrincipalSubject, subject.ID)
+
+	// Credentials outliving their subject would be usable secrets belonging
+	// to nobody, so they go with it.
+	delete(s.userCredentials, name)
+	delete(s.robotCredentials, name)
+	for id, token := range s.accessTokens {
+		if token.Subject == name {
+			delete(s.accessTokens, id)
+		}
+	}
+	for id, session := range s.sessions {
+		if session.Subject == name {
+			delete(s.sessions, id)
+		}
+	}
 	return nil
 }
 

@@ -41,6 +41,11 @@ type Store struct {
 	roles         map[string]meta.Role
 	bindings      map[string]meta.Binding
 
+	userCredentials  map[string]meta.UserCredential
+	robotCredentials map[string]meta.RobotCredential
+	accessTokens     map[string]meta.AccessToken
+	sessions         map[string]meta.Session
+
 	closed bool
 }
 
@@ -60,6 +65,11 @@ func New() *Store {
 		groupMembers:  make(map[string]map[string]bool),
 		roles:         make(map[string]meta.Role),
 		bindings:      make(map[string]meta.Binding),
+
+		userCredentials:  make(map[string]meta.UserCredential),
+		robotCredentials: make(map[string]meta.RobotCredential),
+		accessTokens:     make(map[string]meta.AccessToken),
+		sessions:         make(map[string]meta.Session),
 	}
 }
 
