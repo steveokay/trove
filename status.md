@@ -17,7 +17,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-004 | ADR: HA posture for v1 | todo | Q5 ✓ | Single-node; locking + cache single-flight implications |
 | D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
 | D-006 | ADR: metadata schema + migration strategy | done | D-017, D-011 | `docs/adr/0006-metadata-schema.md` — full ERD, hosted/cached table families, forward-only per-engine migrations |
-| D-007 | ADR: blob storage layout + digest verification | todo | — | On-disk layout, S3 key scheme, hosted vs cached separation |
+| D-007 | ADR: blob storage layout + digest verification | done | — | `docs/adr/0007-blob-storage-layout.md` — layouts, atomic commit, stream-verify + quarantine, disjoint store instances |
 | D-008 | ADR: retention/GC safety model | todo | D-007 | Proof sketch that GC cannot delete a referenced blob |
 | D-009 | Choose license | todo | Q9 ✓ | Apache-2.0 decided; `LICENSE` file lands with F-001 scaffold |
 | D-011 | ADR: repository model — hosted / proxy / group | done | D-017 | `docs/adr/0005-repository-model.md` — prefix routing, pure group resolution, write rules, lifecycle (dep flipped: D-006 now consumes this) |
