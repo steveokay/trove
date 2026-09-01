@@ -15,7 +15,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-002 | ADR: scanner choice (library vs binary) | done | Q2 ✓ | `docs/adr/0017-scanner-integration.md` — Trivy-as-library behind adapter, golden corpus, table-backed queue, air-gapped DB import |
 | D-003 | ADR: authentication model | done | Q3 ✓ | `docs/adr/0004-authentication-model.md` — users, robots, PATs, OCI token flow, UI sessions, bootstrap/recovery |
 | D-004 | ADR: HA posture for v1 | done | Q5 ✓ | `docs/adr/0018-ha-posture.md` — single node + lock file, seam table, no memory-resident correctness state |
-| D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
+| D-005 | ADR: UI stack + design direction | done | — | `docs/adr/0019-ui-stack.md` — Svelte 5 + Vite static SPA, near-zero runtime deps, offline pnpm builds; recorded in CLAUDE.md §10 |
 | D-006 | ADR: metadata schema + migration strategy | done | D-017, D-011 | `docs/adr/0006-metadata-schema.md` — full ERD, hosted/cached table families, forward-only per-engine migrations |
 | D-007 | ADR: blob storage layout + digest verification | done | — | `docs/adr/0007-blob-storage-layout.md` — layouts, atomic commit, stream-verify + quarantine, disjoint store instances |
 | D-008 | ADR: retention/GC safety model | done | D-007 | `docs/adr/0010-retention-gc-safety.md` — pure evaluator + plans, mark-and-sweep with grace window, proof sketch, race matrix |
@@ -183,7 +183,7 @@ existing queries is how disclosure bugs get shipped.
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
-| U-001 | UI scaffold on chosen stack | blocked | D-005 | Builds offline; embedded via `go:embed` |
+| U-001 | UI scaffold on chosen stack | todo | D-005 ✓ | Svelte 5 + Vite per ADR 0019; builds offline; embedded via `go:embed` |
 | U-002 | Effective-permissions endpoint + UI gating | todo | U-001, Z-013 | Unusable actions hidden; server-side authz still enforced independently |
 | U-003 | Repo/tag/manifest browsing | todo | U-002, R-003 | Copyable digests; dense tables; keyboard navigable |
 | U-004 | SBOM + CVE report views | todo | U-002, S-006 | Filter by severity and fixability |

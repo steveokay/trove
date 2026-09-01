@@ -521,7 +521,11 @@ Constraints the decision must satisfy:
 - Renders from an effective-permissions endpoint; hides unusable actions (§5).
 - The API is the contract; the UI is one client of it. Nothing is UI-only.
 
-Record the chosen stack here once the ADR lands, then follow it.
+**Chosen stack (ADR 0019, `docs/adr/0019-ui-stack.md`):** Svelte 5 + Vite static
+SPA, TypeScript, near-zero runtime dependencies, hash-based routing, pnpm with a
+committed lockfile and cached store for offline CI builds, `go:embed` of
+`web/dist`. Dark is the reference theme; axe/WCAG-AA checks run in the Playwright
+smoke suite. Follow it.
 
 ---
 
