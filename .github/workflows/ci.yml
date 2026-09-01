@@ -36,6 +36,13 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          # Schema verification fetches a JSON schema from golangci-lint.run on
+          # every run, which makes linting depend on a third-party site being
+          # up: it has already failed CI once on a timeout. The config is
+          # exercised for real by the run below, and by every developer's
+          # `make lint`, so nothing is lost by not re-validating its shape
+          # against the network.
+          verify: false
       - name: shellcheck
         run: shellcheck scripts/*.sh
 
