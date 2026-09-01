@@ -16,11 +16,11 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-003 | ADR: authentication model | done | Q3 ✓ | `docs/adr/0004-authentication-model.md` — users, robots, PATs, OCI token flow, UI sessions, bootstrap/recovery |
 | D-004 | ADR: HA posture for v1 | todo | Q5 ✓ | Single-node; locking + cache single-flight implications |
 | D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
-| D-006 | ADR: metadata schema + migration strategy | todo | D-017 | ERD covering repos, artifacts, cache leases, subjects, roles, bindings, CVEs, events |
+| D-006 | ADR: metadata schema + migration strategy | todo | D-017, D-011 | ERD covering repos, artifacts, cache leases, subjects, roles, bindings, CVEs, events |
 | D-007 | ADR: blob storage layout + digest verification | todo | — | On-disk layout, S3 key scheme, hosted vs cached separation |
 | D-008 | ADR: retention/GC safety model | todo | D-007 | Proof sketch that GC cannot delete a referenced blob |
 | D-009 | Choose license | todo | Q9 ✓ | Apache-2.0 decided; `LICENSE` file lands with F-001 scaffold |
-| D-011 | ADR: repository model — hosted / proxy / group | todo | D-006 | Type hierarchy, router semantics, write rules, member ordering |
+| D-011 | ADR: repository model — hosted / proxy / group | done | D-017 | `docs/adr/0005-repository-model.md` — prefix routing, pure group resolution, write rules, lifecycle (dep flipped: D-006 now consumes this) |
 | D-012 | ADR: cache semantics | todo | Q11 ✓ | Tag TTL + revalidation, negative cache, offline mode, single-flight |
 | D-013 | ADR: cache eviction vs retention separation | todo | D-007, D-011 | Type-level guarantee the two deletion paths cannot cross |
 | D-014 | ADR: event model + webhook delivery | todo | D-006 | Event taxonomy, idempotency key, retry/backoff, signing, permission filtering |
