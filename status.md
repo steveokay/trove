@@ -31,7 +31,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-019 | **ADR: visibility & disclosure policy** | done | Q18 ✓ | `docs/adr/0003-visibility-disclosure.md` — status-code matrix, ten enumerated filtered surfaces |
 | D-020 | ADR: admin API + CLI conventions | todo | Q23 ✓ | Versioning, error format, pagination, auth for the admin API; CLI-as-API-client + `--offline` exceptions |
 | D-021 | ADR: secrets key management | todo | Q21 ✓ | Auto-generated keyfile, AES-256-GCM, rotation command; distinct from blob encryption at rest (Q13) |
-| D-022 | ADR: referrer lifecycle on subject deletion | todo | Q22 ✓ | Cascade decided; untagged reaping provably cannot delete a referrer of a live subject |
+| D-022 | ADR: referrer lifecycle on subject deletion | done | Q22 ✓ | `docs/adr/0011-referrer-lifecycle.md` — transitive cascade, plan visibility, live-attachment protection, orphan sweep |
 | D-010 | Decompose Phases 1–8 into implementable tasks | todo | D-001..D-022 | Every task has criteria, files, deps, test plan |
 
 ---
