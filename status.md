@@ -19,7 +19,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-006 | ADR: metadata schema + migration strategy | done | D-017, D-011 | `docs/adr/0006-metadata-schema.md` — full ERD, hosted/cached table families, forward-only per-engine migrations |
 | D-007 | ADR: blob storage layout + digest verification | done | — | `docs/adr/0007-blob-storage-layout.md` — layouts, atomic commit, stream-verify + quarantine, disjoint store instances |
 | D-008 | ADR: retention/GC safety model | done | D-007 | `docs/adr/0010-retention-gc-safety.md` — pure evaluator + plans, mark-and-sweep with grace window, proof sketch, race matrix |
-| D-009 | Choose license | todo | Q9 ✓ | Apache-2.0 decided; `LICENSE` file lands with F-001 scaffold |
+| D-009 | Choose license | done | Q9 ✓ | Apache-2.0; canonical `LICENSE` committed (repo went public ahead of F-001) |
 | D-011 | ADR: repository model — hosted / proxy / group | done | D-017 | `docs/adr/0005-repository-model.md` — prefix routing, pure group resolution, write rules, lifecycle (dep flipped: D-006 now consumes this) |
 | D-012 | ADR: cache semantics | done | Q11 ✓ | `docs/adr/0008-cache-semantics.md` — leases, negative cache, offline modes, single-flight, backoff, eviction defaults |
 | D-013 | ADR: cache eviction vs retention separation | done | D-007, D-011 | `docs/adr/0009-eviction-retention-separation.md` — four walls: types, wiring, imports, schema; proving test defined |
