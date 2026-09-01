@@ -13,7 +13,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 |---|---|---|---|---|
 | D-001 | Confirm project name + module path | done | Q1 | Name agreed; `go.mod` path recorded in CLAUDE.md |
 | D-002 | ADR: scanner choice (library vs binary) | todo | Q2 ✓ | Decision, rejected options, dependency-graph impact |
-| D-003 | ADR: authentication model | todo | Q3 ✓ | Users, robot accounts, local groups, OCI token flow, anonymous subject |
+| D-003 | ADR: authentication model | done | Q3 ✓ | `docs/adr/0004-authentication-model.md` — users, robots, PATs, OCI token flow, UI sessions, bootstrap/recovery |
 | D-004 | ADR: HA posture for v1 | todo | Q5 ✓ | Single-node; locking + cache single-flight implications |
 | D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
 | D-006 | ADR: metadata schema + migration strategy | todo | D-017 | ERD covering repos, artifacts, cache leases, subjects, roles, bindings, CVEs, events |
