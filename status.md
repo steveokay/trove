@@ -14,7 +14,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-001 | Confirm project name + module path | done | Q1 | Name agreed; `go.mod` path recorded in CLAUDE.md |
 | D-002 | ADR: scanner choice (library vs binary) | done | Q2 ✓ | `docs/adr/0017-scanner-integration.md` — Trivy-as-library behind adapter, golden corpus, table-backed queue, air-gapped DB import |
 | D-003 | ADR: authentication model | done | Q3 ✓ | `docs/adr/0004-authentication-model.md` — users, robots, PATs, OCI token flow, UI sessions, bootstrap/recovery |
-| D-004 | ADR: HA posture for v1 | todo | Q5 ✓ | Single-node; locking + cache single-flight implications |
+| D-004 | ADR: HA posture for v1 | done | Q5 ✓ | `docs/adr/0018-ha-posture.md` — single node + lock file, seam table, no memory-resident correctness state |
 | D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
 | D-006 | ADR: metadata schema + migration strategy | done | D-017, D-011 | `docs/adr/0006-metadata-schema.md` — full ERD, hosted/cached table families, forward-only per-engine migrations |
 | D-007 | ADR: blob storage layout + digest verification | done | — | `docs/adr/0007-blob-storage-layout.md` — layouts, atomic commit, stream-verify + quarantine, disjoint store instances |
