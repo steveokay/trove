@@ -33,6 +33,14 @@ type Store struct {
 	blobs   map[meta.Digest]meta.Blob
 	uploads map[string]meta.UploadSession
 
+	// Identity is keyed by name, the handle operators use; ids are the
+	// stable reference bindings point at.
+	subjects      map[string]meta.Subject
+	subjectGroups map[string]meta.SubjectGroup
+	groupMembers  map[string]map[string]bool // group name -> subject names
+	roles         map[string]meta.Role
+	bindings      map[string]meta.Binding
+
 	closed bool
 }
 
@@ -46,6 +54,12 @@ func New() *Store {
 		tags:      make(map[string]map[string]meta.Tag),
 		blobs:     make(map[meta.Digest]meta.Blob),
 		uploads:   make(map[string]meta.UploadSession),
+
+		subjects:      make(map[string]meta.Subject),
+		subjectGroups: make(map[string]meta.SubjectGroup),
+		groupMembers:  make(map[string]map[string]bool),
+		roles:         make(map[string]meta.Role),
+		bindings:      make(map[string]meta.Binding),
 	}
 }
 

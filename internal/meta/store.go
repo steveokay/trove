@@ -20,6 +20,7 @@ import (
 type Store interface {
 	RepositoryStore
 	ContentStore
+	IdentityStore
 
 	// Close releases the store's resources. It is safe to call twice.
 	Close() error
@@ -128,4 +129,97 @@ type ContentStore interface {
 	// ListStaleUploads returns sessions untouched since the cutoff, oldest
 	// first, for the upload reaper (R-011).
 	ListStaleUploads(ctx context.Context, before time.Time, limit int) ([]UploadSession, error)
+}
+
+// IdentityStore manages subjects, groups, roles, and bindings: everything the
+// authorization decision needs, and nothing that decides anything itself. The
+// decision function is pure and lives in authz (ADR 0001); this interface only
+// supplies it with values.
+type IdentityStore interface {
+	// CreateSubject stores a user, robot, or the anonymous subject. Names are
+	// unique across all kinds.
+	CreateSubject(ctx context.Context, subject Subject) error
+
+	// GetSubject returns a subject by name, or ErrNotFound.
+	GetSubject(ctx context.Context, name string) (Subject, error)
+
+	// ListSubjects returns a page of subjects ordered by name.
+	ListSubjects(ctx context.Context, opts ListOptions) (SubjectPage, error)
+
+	// SetSubjectDisabled enables or disables a subject. Disabling is
+	// reversible and keeps bindings intact; deletion does not.
+	SetSubjectDisabled(ctx context.Context, name string, disabled bool) error
+
+	// DeleteSubject removes a subject along with its group memberships and
+	// bindings. It refuses to remove the built-in anonymous subject, which
+	// every unauthenticated request resolves to.
+	DeleteSubject(ctx context.Context, name string) error
+
+	// CreateGroup stores a local group.
+	CreateGroup(ctx context.Context, group SubjectGroup) error
+
+	// GetGroup returns a group by name, or ErrNotFound.
+	GetGroup(ctx context.Context, name string) (SubjectGroup, error)
+
+	// ListGroups returns every group, ordered by name.
+	ListGroups(ctx context.Context) ([]SubjectGroup, error)
+
+	// DeleteGroup removes a group, its memberships, and its bindings.
+	DeleteGroup(ctx context.Context, name string) error
+
+	// AddGroupMember puts a subject in a group. Adding twice is not an error:
+	// membership is a set.
+	AddGroupMember(ctx context.Context, group, subject string) error
+
+	// RemoveGroupMember takes a subject out of a group.
+	RemoveGroupMember(ctx context.Context, group, subject string) error
+
+	// ListGroupMemberSubjects returns a group's members, ordered by name.
+	ListGroupMemberSubjects(ctx context.Context, group string) ([]Subject, error)
+
+	// ListSubjectGroups returns the groups a subject belongs to, ordered by
+	// name.
+	ListSubjectGroups(ctx context.Context, subject string) ([]SubjectGroup, error)
+
+	// CreateRole stores a role. Verbs are stored as given, expanded.
+	CreateRole(ctx context.Context, role Role) error
+
+	// GetRole returns a role by name, or ErrNotFound.
+	GetRole(ctx context.Context, name string) (Role, error)
+
+	// ListRoles returns every role, ordered by name.
+	ListRoles(ctx context.Context) ([]Role, error)
+
+	// UpdateRoleVerbs replaces a custom role's verb set. Built-in roles are
+	// read-only and the store returns ErrInvalid for them.
+	UpdateRoleVerbs(ctx context.Context, name string, verbs []string) error
+
+	// DeleteRole removes a custom role and every binding that granted it.
+	// Built-in roles cannot be deleted.
+	DeleteRole(ctx context.Context, name string) error
+
+	// CreateBinding grants a role to a subject or group within a scope. The
+	// principal and the role must exist. Re-creating an identical binding is
+	// a conflict: bindings are a set, and a duplicate would double-count in
+	// the explainer.
+	CreateBinding(ctx context.Context, binding Binding) error
+
+	// GetBinding returns one binding by id, or ErrNotFound.
+	GetBinding(ctx context.Context, id string) (Binding, error)
+
+	// ListBindings returns every binding, ordered by id.
+	ListBindings(ctx context.Context) ([]Binding, error)
+
+	// DeleteBinding removes one binding by id.
+	DeleteBinding(ctx context.Context, id string) error
+
+	// ListEffectiveBindings returns every binding that applies to a subject:
+	// those bound to it directly and those reaching it through a group, each
+	// tagged with how it arrived. This is the single query authorization runs
+	// per request, and the same data the effective-permission explainer
+	// renders, so the two can never disagree.
+	//
+	// A disabled subject has no effective bindings: disabling must take
+	// effect everywhere at once, not only where someone remembered to check.
+	ListEffectiveBindings(ctx context.Context, subject string) ([]EffectiveBinding, error)
 }

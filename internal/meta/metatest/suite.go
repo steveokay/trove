@@ -20,14 +20,18 @@ import (
 // closed by the suite.
 type Factory func(t *testing.T) meta.Store
 
+// suiteCase is one contract case: a name and the assertions it makes against a
+// freshly built store.
+type suiteCase struct {
+	name string
+	run  func(t *testing.T, s meta.Store)
+}
+
 // Run executes the whole contract suite against the implementation built by f.
 func Run(t *testing.T, f Factory) {
 	t.Helper()
 
-	tests := []struct {
-		name string
-		run  func(t *testing.T, s meta.Store)
-	}{
+	tests := []suiteCase{
 		{"RepositoryCRUD", testRepositoryCRUD},
 		{"RepositoryConflict", testRepositoryConflict},
 		{"RepositoryValidation", testRepositoryValidation},
@@ -53,6 +57,7 @@ func Run(t *testing.T, f Factory) {
 		{"ContextCancellation", testContextCancellation},
 		{"CloseIsIdempotent", testCloseIsIdempotent},
 	}
+	tests = append(tests, identityTests()...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1030,6 +1035,38 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"UpdateUpload", func() error { return s.UpdateUpload(ctx, "u", 1, testTime) }},
 		{"DeleteUpload", func() error { return s.DeleteUpload(ctx, "u") }},
 		{"ListStaleUploads", func() error { _, err := s.ListStaleUploads(ctx, testTime, 0); return err }},
+
+		{"CreateSubject", func() error {
+			return s.CreateSubject(ctx, meta.Subject{ID: "s", Kind: meta.User, Name: "s"})
+		}},
+		{"GetSubject", func() error { _, err := s.GetSubject(ctx, "s"); return err }},
+		{"ListSubjects", func() error { _, err := s.ListSubjects(ctx, meta.ListOptions{}); return err }},
+		{"SetSubjectDisabled", func() error { return s.SetSubjectDisabled(ctx, "s", true) }},
+		{"DeleteSubject", func() error { return s.DeleteSubject(ctx, "s") }},
+		{"CreateGroup", func() error {
+			return s.CreateGroup(ctx, meta.SubjectGroup{ID: "g", Name: "g"})
+		}},
+		{"GetGroup", func() error { _, err := s.GetGroup(ctx, "g"); return err }},
+		{"ListGroups", func() error { _, err := s.ListGroups(ctx); return err }},
+		{"DeleteGroup", func() error { return s.DeleteGroup(ctx, "g") }},
+		{"AddGroupMember", func() error { return s.AddGroupMember(ctx, "g", "s") }},
+		{"RemoveGroupMember", func() error { return s.RemoveGroupMember(ctx, "g", "s") }},
+		{"ListGroupMemberSubjects", func() error { _, err := s.ListGroupMemberSubjects(ctx, "g"); return err }},
+		{"ListSubjectGroups", func() error { _, err := s.ListSubjectGroups(ctx, "s"); return err }},
+		{"CreateRole", func() error { return s.CreateRole(ctx, meta.Role{Name: "r"}) }},
+		{"GetRole", func() error { _, err := s.GetRole(ctx, "r"); return err }},
+		{"ListRoles", func() error { _, err := s.ListRoles(ctx); return err }},
+		{"UpdateRoleVerbs", func() error { return s.UpdateRoleVerbs(ctx, "r", nil) }},
+		{"DeleteRole", func() error { return s.DeleteRole(ctx, "r") }},
+		{"CreateBinding", func() error {
+			return s.CreateBinding(ctx, meta.Binding{
+				ID: "b", PrincipalKind: meta.PrincipalSubject, PrincipalID: "s", Role: "r", Scope: "*",
+			})
+		}},
+		{"GetBinding", func() error { _, err := s.GetBinding(ctx, "b"); return err }},
+		{"ListBindings", func() error { _, err := s.ListBindings(ctx); return err }},
+		{"DeleteBinding", func() error { return s.DeleteBinding(ctx, "b") }},
+		{"ListEffectiveBindings", func() error { _, err := s.ListEffectiveBindings(ctx, "s"); return err }},
 	}
 }
 
