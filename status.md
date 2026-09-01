@@ -12,7 +12,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
 | D-001 | Confirm project name + module path | done | Q1 | Name agreed; `go.mod` path recorded in CLAUDE.md |
-| D-002 | ADR: scanner choice (library vs binary) | todo | Q2 ✓ | Decision, rejected options, dependency-graph impact |
+| D-002 | ADR: scanner choice (library vs binary) | done | Q2 ✓ | `docs/adr/0017-scanner-integration.md` — Trivy-as-library behind adapter, golden corpus, table-backed queue, air-gapped DB import |
 | D-003 | ADR: authentication model | done | Q3 ✓ | `docs/adr/0004-authentication-model.md` — users, robots, PATs, OCI token flow, UI sessions, bootstrap/recovery |
 | D-004 | ADR: HA posture for v1 | todo | Q5 ✓ | Single-node; locking + cache single-flight implications |
 | D-005 | ADR: UI stack + design direction | todo | — | Stack chosen against CLAUDE.md §10 constraints; recorded back in CLAUDE.md |
