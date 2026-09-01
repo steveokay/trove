@@ -87,6 +87,18 @@ Production is Linux; development may not be. Three rules keep that honest:
   `core.autocrlf` alone.
 - Long paths: enable `git config --global core.longpaths true` if you hit
   path-length errors on deeply nested test fixtures.
+- **New shell scripts need their executable bit set in git explicitly.** Windows
+  does not carry the mode bit, so `chmod +x` alone is invisible to git and the
+  script lands in the repo as `100644` — Linux CI then fails with
+  "Permission denied". Run:
+
+  ```bash
+  git update-index --chmod=+x scripts/your-script.sh
+  ```
+
+  As a belt-and-braces measure, the Makefile and CI invoke scripts as
+  `bash scripts/x.sh` rather than `./scripts/x.sh`, so a missing bit cannot break
+  the build.
 
 ## Repository layout
 

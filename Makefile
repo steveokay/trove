@@ -40,7 +40,7 @@ test: ## Run the test suite with the race detector
 .PHONY: cover
 cover: ## Run tests and enforce the coverage gate (>=95%)
 	go test ./... -covermode=atomic -coverpkg=./... -coverprofile=coverage.out
-	./scripts/coverage.sh coverage.out $(COVERAGE_MIN)
+	bash scripts/coverage.sh coverage.out $(COVERAGE_MIN)
 
 .PHONY: cover-html
 cover-html: cover ## Open the coverage report in a browser
@@ -48,7 +48,7 @@ cover-html: cover ## Open the coverage report in a browser
 
 .PHONY: cover-selftest
 cover-selftest: ## Verify the coverage gate script itself
-	./scripts/coverage_test.sh
+	bash scripts/coverage_test.sh
 
 .PHONY: lint
 lint: ## Run go vet and golangci-lint
