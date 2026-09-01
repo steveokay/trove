@@ -30,7 +30,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-018 | **ADR: permission vocabulary** | done | D-017 | `docs/adr/0002-permission-vocabulary.md` — 33 verbs incl. `repo:create`/`repo:configure`, splits justified, verb → operation mapping |
 | D-019 | **ADR: visibility & disclosure policy** | done | Q18 ✓ | `docs/adr/0003-visibility-disclosure.md` — status-code matrix, ten enumerated filtered surfaces |
 | D-020 | ADR: admin API + CLI conventions | done | Q23 ✓ | `docs/adr/0015-admin-api-cli.md` — /api/v1, problem+json, cursor pagination, spec-vs-route CI check, offline exceptions |
-| D-021 | ADR: secrets key management | todo | Q21 ✓ | Auto-generated keyfile, AES-256-GCM, rotation command; distinct from blob encryption at rest (Q13) |
+| D-021 | ADR: secrets key management | done | Q21 ✓ | `docs/adr/0016-secrets-key-management.md` — keyfile + key-id format, AAD context binding, two-step rotation, redaction rules |
 | D-022 | ADR: referrer lifecycle on subject deletion | done | Q22 ✓ | `docs/adr/0011-referrer-lifecycle.md` — transitive cascade, plan visibility, live-attachment protection, orphan sweep |
 | D-010 | Decompose Phases 1–8 into implementable tasks | todo | D-001..D-022 | Every task has criteria, files, deps, test plan |
 
