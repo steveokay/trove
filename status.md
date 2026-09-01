@@ -42,7 +42,7 @@ Detailed specs (files, test plans): `docs/plan/phase-1-foundations.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
-| F-001 | Repo scaffold, module, Makefile, CI skeleton | todo | D-001 ✓, Q25 ✓ | `make build test lint` works in WSL2 and in CI; `LICENSE` (Apache-2.0) included |
+| F-001 | Repo scaffold, module, Makefile, CI skeleton | review | D-001 ✓, Q25 ✓ | `make build test lint cover test-linux` green locally; CI (lint/test/build matrix) added — awaiting first green run. Coverage 100% excluding `cmd/trove/main.go` (gate formalised in F-002) |
 | F-002 | Coverage gate script (≥95%, `-coverpkg=./...`) | todo | F-001 | CI fails on a deliberate coverage drop — proven, not assumed |
 | F-003 | Config load/validate/defaults | todo | F-001 | Flags > env > file > defaults; invalid config refuses startup; secrets redacted |
 | F-004 | Structured logging + graceful shutdown | todo | F-001 | `log/slog`; in-flight requests drain on SIGTERM |

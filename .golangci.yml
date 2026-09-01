@@ -1,0 +1,38 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - revive
+    - misspell
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: package-comments
+      - name: context-as-argument
+      - name: error-return
+      - name: error-strings
+      - name: indent-error-flow
+      - name: bare-return
+  errcheck:
+    check-type-assertions: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files may use weak randomness, hardcoded credentials in fixtures,
+    # and unchecked writes to in-memory buffers.
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
