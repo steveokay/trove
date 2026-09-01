@@ -21,7 +21,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-008 | ADR: retention/GC safety model | todo | D-007 | Proof sketch that GC cannot delete a referenced blob |
 | D-009 | Choose license | todo | Q9 ✓ | Apache-2.0 decided; `LICENSE` file lands with F-001 scaffold |
 | D-011 | ADR: repository model — hosted / proxy / group | done | D-017 | `docs/adr/0005-repository-model.md` — prefix routing, pure group resolution, write rules, lifecycle (dep flipped: D-006 now consumes this) |
-| D-012 | ADR: cache semantics | todo | Q11 ✓ | Tag TTL + revalidation, negative cache, offline mode, single-flight |
+| D-012 | ADR: cache semantics | done | Q11 ✓ | `docs/adr/0008-cache-semantics.md` — leases, negative cache, offline modes, single-flight, backoff, eviction defaults |
 | D-013 | ADR: cache eviction vs retention separation | todo | D-007, D-011 | Type-level guarantee the two deletion paths cannot cross |
 | D-014 | ADR: event model + webhook delivery | todo | D-006 | Event taxonomy, idempotency key, retry/backoff, signing, permission filtering |
 | D-015 | ADR: pull gating design | todo | Q12 ✓, Q24 ✓ | Enforcement points, digest/referrer bypass closure, `gate:override` break-glass, serve-vs-block while a cache-fill scan is pending |
