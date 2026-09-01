@@ -6,9 +6,11 @@
 # and fails if the remaining line coverage is below the threshold.
 #
 # Excluded from the denominator -- nothing else:
-#   * cmd/*/main.go   process wiring
-#   * *_mock.go       generated mocks
-#   * *.gen.go        generated code
+#   * cmd/*/main.go     process wiring
+#   * *_mock.go         generated mocks
+#   * *.gen.go          generated code
+#   * */<name>test/*    shared test harnesses (metatest, blobtest)
+#   * test/*            the top-level test tree
 #
 # Usage: scripts/coverage.sh [profile] [threshold]
 
@@ -41,7 +43,11 @@ read -r covered total excluded_files < <(
 			block = $1
 			file = block
 			sub(/:.*/, "", file)
-			if (file ~ /\/cmd\/[^\/]+\/main\.go$/ || file ~ /_mock\.go$/ || file ~ /\.gen\.go$/) {
+			if (file ~ /\/cmd\/[^\/]+\/main\.go$/ ||
+			    file ~ /_mock\.go$/ ||
+			    file ~ /\.gen\.go$/ ||
+			    file ~ /\/[a-z0-9]+test\// ||
+			    file ~ /\/test\//) {
 				excluded[file] = 1
 				next
 			}

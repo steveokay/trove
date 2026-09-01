@@ -454,8 +454,17 @@ regardless of what the UI rendered.
 ## 9. Testing (the 95% bar)
 
 **Gate:** `go test ./... -covermode=atomic -coverpkg=./...` must report ≥95.0% line
-coverage. CI fails below it. Excluded from the denominator: generated code, mocks, and
-`cmd/*/main.go` wiring — nothing else.
+coverage. CI fails below it. Excluded from the denominator: generated code, mocks,
+`cmd/*/main.go` wiring, and **shared test harnesses** — directories named `*test`
+(`internal/meta/metatest`, `internal/blob/blobtest`) and the top-level `test/` tree.
+Nothing else.
+
+The harness exclusion (added 2026-09-01, F-005) exists because a contract suite is
+test code that happens to live in an importable package: its `t.Errorf` branches
+execute only when an implementation is *broken*, so counting them means the only way
+to raise the number is to delete assertions. That is precisely backwards, and it is
+the same reason mocks are excluded. Harnesses are still held to the bar in substance:
+they are reviewed as tests, and the implementations they exercise are fully counted.
 
 The bar is achievable only if the code is designed for it:
 

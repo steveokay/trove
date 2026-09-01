@@ -50,6 +50,21 @@ printf 'mode: atomic\n%s/internal/a/a.go:1.1,3.2 10 1\n%s/internal/a/store_mock.
 	"$M" "$M" "$M" >"$tmp/gen.profile"
 assert "mocks and generated code excluded" 0 "$tmp/gen.profile"
 
+# Shared test harnesses are excluded: their assertion branches only run when an
+# implementation is broken.
+printf 'mode: atomic
+%s/internal/a/a.go:1.1,3.2 10 1
+%s/internal/meta/metatest/suite.go:1.1,9.2 80 0
+%s/test/conformance/run.go:1.1,9.2 40 0
+' 	"$M" "$M" "$M" >"$tmp/harness.profile"
+assert "test harnesses excluded" 0 "$tmp/harness.profile"
+
+# A package merely containing "test" in its name mid-path is still counted.
+printf 'mode: atomic
+%s/internal/attestation/verify.go:1.1,9.2 50 0
+' "$M" >"$tmp/attest.profile"
+assert "production package with test-like name still counted" 1 "$tmp/attest.profile"
+
 # A non-main .go file named like a command must NOT be excluded.
 printf 'mode: atomic\n%s/internal/cli/main.go:1.1,9.2 50 0\n' "$M" >"$tmp/notcmd.profile"
 assert "internal main.go still counted" 1 "$tmp/notcmd.profile"

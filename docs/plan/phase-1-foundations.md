@@ -63,8 +63,14 @@ Parallelization: F-001→F-002 are serial. After F-003/F-004, the two interface 
 - **Test:** Shutdown drain test with a slow handler; lock-contention test; log
   output shape golden-tested.
 
-## F-005 `meta.Store` interface + contract test suite
+## F-005 `meta.Store` core: repositories + content
 - **Deps:** D-006 ✓
+- **Scope note (amended 2026-09-01):** ADR 0006's six entity groups are staged
+  rather than frozen at once. F-005 lands the harness plus repositories and
+  content; F-005b adds identity/authz (needed by Phase 2); the cached-content,
+  scan, and ops groups arrive with the phases that consume them, so their
+  interfaces are designed against real callers instead of guesses. The suite and
+  the in-memory reference implementation grow with each.
 - **Files:** `internal/meta/{store.go,types.go,errors.go}`,
   `internal/meta/metatest/suite.go`
 - **Do:** Interfaces partitioned by ADR 0006 entity groups (RepoStore,
