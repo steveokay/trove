@@ -1,0 +1,7 @@
+# Local agent/editor settings
+.claude/settings.local.json
+
+# Build output (populated once the Go scaffold lands — F-001)
+/bin/
+/dist/
+coverage.out
