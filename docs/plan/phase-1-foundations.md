@@ -16,11 +16,16 @@ Parallelization: F-001→F-002 are serial. After F-003/F-004, the two interface 
 - **Do:** Create the §3 package directories (empty except doc.go where needed).
   `main.go` wires cobra-style subcommand dispatch (stdlib `flag` + manual dispatch —
   no cobra; keep deps near zero) with `version` implemented. Makefile targets:
-  `build test lint cover ui-build vendor-audit`. CI (ubuntu-latest): lint, `go vet`,
-  `go test -race -covermode=atomic -coverpkg=./...`. Document the WSL2 workflow
-  (clone inside WSL, Docker Desktop WSL2 backend) in `docs/dev/environment.md`.
-- **Accept:** `make build test lint` green in WSL2 and CI; version stamped via
-  `-ldflags -X`; LICENSE already present.
+  `build test lint cover test-linux ui-build vendor-audit`. `test-linux` (Q25 rev.):
+  full suite in `golang:1.x-bookworm` via Docker Desktop — repo bind-mounted,
+  `GOCACHE`/`GOMODCACHE` on a named volume, `/var/run/docker.sock` mounted so
+  testcontainers works from inside. CI (ubuntu-latest): lint, `go vet`,
+  `go test -race -covermode=atomic -coverpkg=./...`. Document the native-Windows +
+  container-parity workflow (incl. `runtime.GOOS` skip convention for Unix-only
+  tests) in `docs/dev/environment.md`.
+- **Accept:** `make build test lint` green natively on Windows and in CI;
+  `make test-linux` green via Docker; version stamped via `-ldflags -X`; LICENSE
+  already present.
 - **Test:** CI run on the PR is the test; `internal/version` unit-tested (table).
 
 ## F-002 Coverage gate script
@@ -111,7 +116,8 @@ Parallelization: F-001→F-002 are serial. After F-003/F-004, the two interface 
   committed files, quarantine-on-read-mismatch, root confinement (driver refuses
   any path escaping its root — defense-in-depth under ADR 0009 wall 2).
 - **Accept:** blobtest green; quarantine path emits `blob.corrupt` via injected
-  event hook; works on ext4 (CI) — NTFS quirks are out of scope per Q25.
+  event hook; correctness target is ext4 (CI / `test-linux`) — permission-bit and
+  case-sensitivity subtests skip on win32 per the Q25 revision.
 - **Test:** blobtest; crash-between-fsync-and-rename simulation (staging file
   present, blob absent, next Put succeeds); read-mismatch quarantine test with a
   deliberately corrupted file.

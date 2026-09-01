@@ -251,7 +251,7 @@ Full statements live in CLAUDE.md §13; ADR tasks D-002…D-022 formalise them.
 | Q22 | Subject deletion cascade-deletes its referrers, each audited |
 | Q23 | CLI is an admin-API client (`trove login`/`TROVE_TOKEN`); `serve`, `version`, `--offline db import` excepted |
 | Q24 | Cache-fill pull served immediately; async scan gates subsequent pulls; per-policy strict mode |
-| Q25 | Development in WSL2 + Docker Desktop; CI is the authoritative gate |
+| Q25 | Native Windows inner loop (revised 2026-09-01); `make test-linux` in a Debian-based `golang` container with docker-socket mount; Linux CI authoritative |
 
 ---
 

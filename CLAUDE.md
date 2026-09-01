@@ -635,7 +635,7 @@ challenges one, raise it explicitly — never silently diverge.
 | Q22 | Deleting a subject artifact **cascade-deletes its referrers** (SBOMs, signatures, scan results), each audited individually. |
 | Q23 | The CLI is a **client of the admin API** (`trove login`, `TROVE_TOKEN`). Offline exceptions: `serve`, `version`, and an explicit `--offline` mode for `db import` / disaster recovery. |
 | Q24 | The pull that triggers a cache fill is **served immediately**; scan runs async and gates subsequent pulls. Per-policy strict "block-until-scanned" mode exists for high-security repos. |
-| Q25 | Development happens in **WSL2 + Docker Desktop (WSL2 backend)**; repo lives in the WSL filesystem. CI remains the authoritative gate. |
+| Q25 | **Native Windows dev** for the inner loop (revised 2026-09-01; was WSL2). Unix-only tests skip on win32 via `runtime.GOOS`. `make test-linux` runs the full suite in an Ubuntu-based Go container (repo bind-mounted, Go caches on a named volume, docker socket mounted so testcontainers works). Linux CI remains the authoritative gate. |
 
 ---
 
