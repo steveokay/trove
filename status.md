@@ -5,6 +5,10 @@ describes. See `CLAUDE.md` §14 for the protocol.
 
 **Legend:** `todo` · `blocked` · `in-progress` · `review` · `done`
 
+No task is `blocked` as of 2026-09-01: every open question (Q1–Q25) is decided and all
+Phase 0 ADRs have landed. A task's `Depends on` column still names the tasks that must
+precede it — that is ordering, not a blocker.
+
 ---
 
 ## Phase 0 — Decisions (Fable 5, no code)
@@ -64,25 +68,25 @@ Detailed specs (files, test plans): `docs/plan/phase-2-identity-rbac.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
-| Z-001 | Subject model: users, robot accounts, anonymous | blocked | D-003 | One code path for all three; anonymous is a real subject, not a bypass |
-| Z-002 | Users + Argon2id credentials | blocked | D-003 | Timing-safe compare; rate-limited auth endpoints |
-| Z-003 | Robot accounts: mandatory expiry, revocation | blocked | D-003 | Revoked token rejected on next use, not on next mint; tokens stored hashed at rest |
-| Z-004 | OCI token flow (`WWW-Authenticate` / bearer) | blocked | D-003 | `docker login` works end to end; scopes derived from bindings |
+| Z-001 | Subject model: users, robot accounts, anonymous | todo | D-003 | One code path for all three; anonymous is a real subject, not a bypass |
+| Z-002 | Users + Argon2id credentials | todo | D-003 | Timing-safe compare; rate-limited auth endpoints |
+| Z-003 | Robot accounts: mandatory expiry, revocation | todo | D-003 | Revoked token rejected on next use, not on next mint; tokens stored hashed at rest |
+| Z-004 | OCI token flow (`WWW-Authenticate` / bearer) | todo | D-003 | `docker login` works end to end; scopes derived from bindings |
 | Z-005 | **Permission vocabulary as typed constants** | todo | D-018 | Exhaustive; test fails if a verb has no positive and negative test |
-| Z-006 | **Role model + built-in roles** | blocked | D-017 | Built-ins non-deletable; custom roles use the same vocabulary |
-| Z-007 | **Binding model + repository pattern matching** | blocked | D-017, Q20 | Pattern grammar fuzz-tested; traversal and overlap cases covered |
-| Z-008 | **`authz.Decide` pure decision function** | blocked | D-017 | No I/O; property-tested; additive union semantics |
+| Z-006 | **Role model + built-in roles** | todo | D-017 | Built-ins non-deletable; custom roles use the same vocabulary |
+| Z-007 | **Binding model + repository pattern matching** | todo | D-017, Q20 | Pattern grammar fuzz-tested; traversal and overlap cases covered |
+| Z-008 | **`authz.Decide` pure decision function** | todo | D-017 | No I/O; property-tested; additive union semantics |
 | Z-009 | **Import-boundary test for `internal/authz`** | todo | Z-008 | Fails if authz imports registry, repo, or storage packages |
 | Z-010 | **Handler-level enforcement middleware** | todo | Z-008 | Enforced at token mint *and* request time |
 | Z-011 | **Route-table guard test (fail closed)** | todo | Z-010 | Walks every route; fails if any lacks an explicit permission check |
-| Z-012 | **Permission-filtered query layer** | blocked | D-019 | Catalog, tags, search, events, metrics all filter in the query, not the handler |
+| Z-012 | **Permission-filtered query layer** | todo | D-019 | Catalog, tags, search, events, metrics all filter in the query, not the handler |
 | Z-013 | **Effective-permission explainer** (CLI + API) | todo | Z-008 | Returns decision *and* every contributing binding |
 | Z-014 | Admin bootstrap + forced first-login rotation | todo | Z-002 | Generated password printed once; no default credential |
 | Z-015 | Self-lockout prevention | todo | Z-007 | Last `role:write`@system binding cannot be removed; clear error |
 | Z-016 | `authz.denied` + `role.changed` events and metrics | todo | Z-010, E-001 | Denials counted by verb; role changes audited before/after |
-| Z-018 | **Disclosure adversarial suite** | blocked | D-019, Z-012 | Unreadable repo absent from catalog, search, tag list, pagination counts, events, metric labels, group resolution |
+| Z-018 | **Disclosure adversarial suite** | todo | D-019, Z-012 | Unreadable repo absent from catalog, search, tag list, pagination counts, events, metric labels, group resolution |
 | Z-019 | **Privilege-escalation adversarial suite** | todo | Z-010 | Token replay post-revocation; `repo:write`↛`repo:delete`; `policy:write`↛`policy:apply`; `proxy:write`↛`proxy:credentials` |
-| Z-020 | UI session auth: browser login, sessions, CSRF | blocked | D-003, D-020 | Separate from the OCI token flow; CSRF + session-fixation tested; rate-limited |
+| Z-020 | UI session auth: browser login, sessions, CSRF | todo | D-003, D-020 | Separate from the OCI token flow; CSRF + session-fixation tested; rate-limited |
 
 ---
 
@@ -115,7 +119,7 @@ Detailed specs (files, test plans): `docs/plan/phase-4-proxy-cache-groups.md`
 |---|---|---|---|---|
 | C-001 | Repository model + router (hosted/proxy/group) | todo | D-011 | Push to a proxy returns `DENIED`; unit-tested resolution matrix |
 | C-002 | Upstream client interface + contract suite | todo | D-012 | Suite runs against `registry:2` and one real remote |
-| C-003 | Upstream credential storage (encrypted, redacted) | blocked | D-003, D-021 | Gated on `proxy:credentials`; never logged or returned on any read path |
+| C-003 | Upstream credential storage (encrypted, redacted) | todo | D-003, D-021 | Gated on `proxy:credentials`; never logged or returned on any read path |
 | C-004 | Blob/manifest fetch-and-cache by digest | todo | C-002, F-009 | Digest verified on arrival; mismatch rejected and not cached |
 | C-005 | Tag → digest lease with TTL + revalidation | todo | Q11 ✓ | Conditional revalidation; default TTL 15m; stale served only in degraded mode |
 | C-006 | Single-flight on concurrent cache fill | todo | C-004 | N concurrent pulls of a cold tag → 1 upstream fetch |
@@ -138,8 +142,8 @@ Detailed specs (files, test plans): `docs/plan/phase-5-scanning.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
-| S-001 | `scan.Scanner` interface + fake impl | blocked | D-002 | No vendor import outside the adapter package |
-| S-002 | Scanner adapter + result normalisation | blocked | D-002 | Vendor JSON never persisted as system of record |
+| S-001 | `scan.Scanner` interface + fake impl | todo | D-002 | No vendor import outside the adapter package |
+| S-002 | Scanner adapter + result normalisation | todo | D-002 | Vendor JSON never persisted as system of record |
 | S-003 | Async scan queue + retry/backoff | todo | S-001 | Push latency unaffected under scan backlog |
 | S-004 | CVE DB lifecycle: online update + offline import | todo | S-002 | `trove db import` tested air-gapped |
 | S-005 | Rescan on DB update + `scan.regressed` event | todo | S-004, E-001 | Previously clean image re-flags on new CVE data |
@@ -148,7 +152,7 @@ Detailed specs (files, test plans): `docs/plan/phase-5-scanning.md`
 | S-008 | Attach scan results as OCI referrers | todo | R-005, S-002 | Readable by external tooling; survives migration |
 | S-009 | Scan-on-cache-fill for proxied content | todo | C-004, S-003 | Cached images not silently exempt from gating |
 | S-010 | Registry-wide scan config with filters | todo | S-003 | Include/exclude by repo pattern |
-| S-011 | Pull gating / quarantine enforcement | blocked | D-015, Q12 ✓, Q24 ✓ | Off by default; serve-on-fill with per-policy strict mode; no bypass via digest, referrers, or group member; `gate:override` audited |
+| S-011 | Pull gating / quarantine enforcement | todo | D-015, Q12 ✓, Q24 ✓ | Off by default; serve-on-fill with per-policy strict mode; no bypass via digest, referrers, or group member; `gate:override` audited |
 
 ---
 
@@ -166,7 +170,7 @@ Detailed specs (files, test plans): `docs/plan/phase-6-policy-gc-quota.md`
 | P-006 | Scheduled policy runs / task scheduler | todo | P-005 | Overlapping runs cannot double-delete |
 | P-007 | Mark-and-sweep GC, resumable | todo | D-008 | Cannot delete a blob referenced by a concurrent upload |
 | P-008 | GC race tests | todo | P-007 | GC vs upload, GC vs delete, interrupted sweep resume |
-| P-009 | Quota accounting + enforcement | blocked | D-016, Q8 ✓ | Per-repo + global; soft-warn event then hard-deny push; cache breach evicts harder, never fails pulls |
+| P-009 | Quota accounting + enforcement | todo | D-016, Q8 ✓ | Per-repo + global; soft-warn event then hard-deny push; cache breach evicts harder, never fails pulls |
 | P-012 | `trove verify` integrity scrub | todo | F-006, F-008 | Re-verifies blob digests; detects meta↔blob drift; read-only; referenced by the restore procedure (DOC-002) |
 
 ---
