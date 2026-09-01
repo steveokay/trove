@@ -25,7 +25,7 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-013 | ADR: cache eviction vs retention separation | done | D-007, D-011 | `docs/adr/0009-eviction-retention-separation.md` — four walls: types, wiring, imports, schema; proving test defined |
 | D-014 | ADR: event model + webhook delivery | done | D-006 | `docs/adr/0012-events-webhooks.md` — taxonomy, outbox pattern, live authz filtering, SSRF validation, retry/DLQ |
 | D-015 | ADR: pull gating design | done | Q12 ✓, Q24 ✓ | `docs/adr/0013-pull-gating.md` — single enforcement door, bypass closure, fail-closed lookups, audited break-glass |
-| D-016 | ADR: quota accounting model | todo | Q8 ✓ | Hosted vs cache budgets, soft/hard thresholds, breach behaviour |
+| D-016 | ADR: quota accounting model | done | Q8 ✓ | `docs/adr/0014-quota-model.md` — attribution vs physical accounting, hysteresis soft-warn, 413+DENIED, cache evicts |
 | D-017 | **ADR: RBAC model** | done | Q14 ✓, Q19 ✓, Q20 ✓ | `docs/adr/0001-rbac-model.md` — subjects, groups, roles, bindings, scope grammar, built-in roles |
 | D-018 | **ADR: permission vocabulary** | done | D-017 | `docs/adr/0002-permission-vocabulary.md` — 33 verbs incl. `repo:create`/`repo:configure`, splits justified, verb → operation mapping |
 | D-019 | **ADR: visibility & disclosure policy** | done | Q18 ✓ | `docs/adr/0003-visibility-disclosure.md` — status-code matrix, ten enumerated filtered surfaces |
