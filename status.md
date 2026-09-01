@@ -48,7 +48,7 @@ Detailed specs (files, test plans): `docs/plan/phase-1-foundations.md`
 |---|---|---|---|---|
 | F-001 | Repo scaffold, module, Makefile, CI skeleton | done | D-001 ✓, Q25 ✓ | `make build test lint cover test-linux` green locally; CI green first run (run 33547896799): vet, gofmt, golangci-lint v1.64.8, race suite, 3-target cross-compile. Coverage 100% excluding `cmd/trove/main.go` |
 | F-002 | Coverage gate script (≥95%, `-coverpkg=./...`) | done | F-001 ✓ | `scripts/coverage.sh` + 10-case self-test + shellcheck, all green in CI (run 33548479273). Drop proven: uncovered func → 89.1%, exit 1. Merges duplicate blocks; degenerate inputs exit 2 |
-| F-003 | Config load/validate/defaults | todo | F-001 | Flags > env > file > defaults; invalid config refuses startup; secrets redacted |
+| F-003 | Config load/validate/defaults | review | F-001 ✓ | `internal/config`: flags > env > file > defaults with per-key source tracking; all problems reported at once naming key + layer; secrets redacted with no unredacted renderer; `trove.example.yaml` + `docs/operator/configuration.md`, drift-tested against defaults. Coverage 99.7% |
 | F-004 | Structured logging + graceful shutdown | todo | F-001 | `log/slog`; in-flight requests drain on SIGTERM |
 | F-005 | `meta.Store` interface + contract test suite | todo | D-006 | One suite, green against both impls |
 | F-006 | SQLite impl + migrations | todo | F-005 | Contract suite green; migrations forward-only |

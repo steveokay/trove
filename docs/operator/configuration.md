@@ -1,0 +1,95 @@
+# Configuration
+
+trove reads configuration from four layers. Later layers win:
+
+1. **Built-in defaults** — a complete, valid configuration on their own.
+2. **A YAML file** — `/etc/trove/trove.yaml` by default. Its absence is fine; a
+   file you explicitly asked for and that cannot be read is a startup error.
+3. **Environment variables** — `TROVE_*`.
+4. **Command-line flags**.
+
+Every setting is reachable from every layer, and the three names are mechanically
+derived from one canonical path:
+
+| Layer | Form | Example |
+|---|---|---|
+| File | nested YAML keys | `cache:` → `tag_ttl: 15m` |
+| Environment | `TROVE_` + path, dots and separators as `_`, upper-cased | `TROVE_CACHE_TAG_TTL=15m` |
+| Flag | path with `_` replaced by `-` | `-cache.tag-ttl=15m` |
+
+Selecting the file itself: `-config /path/trove.yaml` or `TROVE_CONFIG=/path/trove.yaml`.
+
+`trove.example.yaml` in the repository root documents every key with its default
+and the reasoning behind it. A test asserts it stays identical to the built-in
+defaults, so it is safe to copy verbatim.
+
+## Validation
+
+The process refuses to start on an invalid configuration, and reports **every**
+problem at once rather than one per restart. Each message names the key and the
+layer that supplied the value:
+
+```
+invalid configuration: 2 problems:
+  - cache.offline_mode (from file /etc/trove/trove.yaml): must be one of serve-stale, strict, got "pretend"
+  - log.level (from env TROVE_LOG_LEVEL): must be one of debug, info, warn, error, got "chatty"
+```
+
+That last part matters more than it looks: when a value is set in three places,
+knowing *which* one won is the difference between a one-minute fix and an hour.
+
+## Secrets
+
+Fields holding credentials — `database.dsn` and `storage.s3.secret_access_key` —
+are marked secret in the type system. Anything that renders configuration (log
+lines, the admin API, `trove support-bundle`) renders the redacted copy, and
+there is deliberately no unredacted renderer to reach for by mistake.
+
+## Derived paths
+
+These default to locations under `data_dir`, so setting `data_dir` alone moves
+everything together. Set any of them explicitly to override just that one:
+
+| Setting | Derived default |
+|---|---|
+| `storage.fs.root` | `<data_dir>/storage` |
+| `database.dsn` (sqlite) | `<data_dir>/trove.db` |
+| `auth.secrets_key_file` | `<data_dir>/keys/secrets.key` |
+| `auth.token_signing_key_file` | `<data_dir>/keys/token-signing.key` |
+| `tls.acme_cache_dir` | `<data_dir>/acme` |
+
+> **Back up the key files with the database.** A database backup without
+> `keys/` cannot decrypt upstream credentials, and every existing session and
+> token becomes invalid. See the operator guide's backup section.
+
+## Value formats
+
+**Durations** use Go's form: `30s`, `15m`, `12h`, `1h30m`.
+
+**Sizes** accept decimal units (`50GB`, `500MB`), binary units (`512MiB`,
+`1TiB`), or a plain byte count. They render back in the unit that divides them
+exactly, so `50GB` stays `50GB`.
+
+**Lists** are YAML sequences in a file, and comma-separated elsewhere:
+`TROVE_TLS_ACME_DOMAINS=a.example.com,b.example.com`.
+
+**Booleans** accept `true`/`false`. As flags they need no value: `-policy.gating-enabled`.
+
+## Notable defaults, and why
+
+| Setting | Default | Reason |
+|---|---|---|
+| `cache.tag_ttl` | `15m` | Tags move; digests do not. This bounds how long a stale `:latest` can be served before revalidation. |
+| `cache.offline_mode` | `serve-stale` | An unreachable upstream should not stop a cluster from pulling images it already has. |
+| `policy.gating_enabled` | `false` | Observe before blocking. A fresh install with an empty CVE database would otherwise refuse everything. |
+| `metrics.exposure` | `local` | `/metrics` is not exposed publicly until you say so. |
+| `metrics.per_repo` | `false` | Repository names as labels are high-cardinality *and* leak names to anyone who can scrape. |
+| `webhooks.allow_private_targets` | `false` | A webhook target is an outbound request you control the URL of; private ranges are refused so subscriptions cannot probe your network. |
+| `storage.s3.redirect` | `false` | Presigned redirects take trove out of the data path, skipping read-side digest verification. |
+| `scan.concurrency` | `1` | Scanning is memory-hungry; the safe default is one at a time. |
+
+## Related
+
+- `trove.example.yaml` — annotated example with every key
+- `docs/adr/` — the reasoning behind each default
+- `docs/dev/environment.md` — running trove from source

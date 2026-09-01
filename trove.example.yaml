@@ -1,0 +1,115 @@
+# trove configuration — every key below is optional and shows its default.
+#
+# Precedence, lowest to highest: defaults, this file, TROVE_* environment
+# variables, command-line flags. Any key can be set from any layer:
+#
+#   cache.tag_ttl  ->  TROVE_CACHE_TAG_TTL  ->  -cache.tag-ttl
+#
+# Run "trove serve -config /etc/trove/trove.yaml". An invalid configuration
+# stops startup with the offending key and the layer that set it.
+
+# Blobs, the SQLite database, and key material live here. Paths below that are
+# left empty are derived from it, so moving data_dir moves everything.
+data_dir: /var/lib/trove
+
+server:
+  address: ":5000"
+  # Public URL clients use. Required for correct token challenges behind a
+  # reverse proxy; leave empty when trove terminates TLS itself.
+  external_url: ""
+  read_header_timeout: 10s
+  shutdown_grace: 30s
+
+tls:
+  # off | acme | manual. "off" is for development only: docker requires TLS
+  # for any registry that is not localhost.
+  mode: "off"
+  cert_file: ""
+  key_file: ""
+  acme_email: ""
+  acme_domains: []
+  acme_cache_dir: "" # defaults to <data_dir>/acme
+
+database:
+  driver: sqlite # sqlite | postgres
+  dsn: "" # defaults to <data_dir>/trove.db; required for postgres
+  # Migrations run on startup. Disable to stage upgrades (or -no-auto-migrate).
+  auto_migrate: true
+
+storage:
+  driver: fs # fs | s3
+  fs:
+    root: "" # defaults to <data_dir>/storage
+  s3:
+    endpoint: ""
+    bucket: ""
+    region: ""
+    prefix: ""
+    access_key_id: ""
+    secret_access_key: "" # redacted in every dump and support bundle
+    use_ssl: true
+    # Serving reads as presigned URLs takes trove out of the data path, which
+    # also skips our read-side digest verification. Off unless you accept that.
+    redirect: false
+
+cache:
+  # Total size of proxied content kept on disk. Eviction is LRU and never
+  # fails a pull: a breach evicts harder rather than blocking the cluster.
+  budget: 50GB
+  # How long a tag -> digest mapping is trusted before revalidating upstream
+  # with a conditional request. Digests themselves are cached forever.
+  tag_ttl: 15m
+  # How long an upstream "not found" is remembered, so a typo does not hammer
+  # the upstream. Applies to names and tags, never to digests.
+  negative_ttl: 60s
+  # serve-stale: keep serving cached content when the upstream is unreachable.
+  # strict: fail instead. serve-stale keeps clusters running.
+  offline_mode: serve-stale
+
+auth:
+  token_ttl: 5m # registry bearer tokens; permissions are re-checked every request
+  session_idle_ttl: 24h # browser sessions
+  session_absolute_ttl: 168h
+  robot_default_expiry: 2160h # 90 days; robot accounts always expire
+  secrets_key_file: "" # defaults to <data_dir>/keys/secrets.key
+  token_signing_key_file: "" # defaults to <data_dir>/keys/token-signing.key
+
+scan:
+  enabled: true
+  # Scanning is memory-hungry; raise only with headroom to spare.
+  concurrency: 1
+  # Set false for air-gapped installs and use "trove db import" instead.
+  db_update_enabled: true
+  db_update_interval: 12h
+
+policy:
+  # Pull gating is off by default: new deployments observe first. Enable it
+  # per repository once you have scan results you trust.
+  gating_enabled: false
+
+quota:
+  global_hosted: 0 # 0 means unlimited
+  soft_threshold_percent: 85 # warn here, deny at 100%
+
+webhooks:
+  # Webhook targets in private address ranges are refused, because a
+  # subscription is otherwise a probe of your internal network.
+  allow_private_targets: false
+  history_retention: 720h # 30 days of delivery history
+
+metrics:
+  # local: only reachable on the listen address. authed: requires a token.
+  # open: unauthenticated /metrics.
+  exposure: local
+  # Repository names as metric labels are both high-cardinality and a
+  # disclosure surface. Off by default.
+  per_repo: false
+
+events:
+  # Pull events are high volume. They always feed metrics and pull statistics;
+  # this only controls whether each one is stored and webhook-deliverable.
+  persist_pulls: false
+
+log:
+  level: info # debug | info | warn | error
+  format: json # json | text
