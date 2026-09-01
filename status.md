@@ -32,11 +32,13 @@ describes. See `CLAUDE.md` §14 for the protocol.
 | D-020 | ADR: admin API + CLI conventions | done | Q23 ✓ | `docs/adr/0015-admin-api-cli.md` — /api/v1, problem+json, cursor pagination, spec-vs-route CI check, offline exceptions |
 | D-021 | ADR: secrets key management | done | Q21 ✓ | `docs/adr/0016-secrets-key-management.md` — keyfile + key-id format, AAD context binding, two-step rotation, redaction rules |
 | D-022 | ADR: referrer lifecycle on subject deletion | done | Q22 ✓ | `docs/adr/0011-referrer-lifecycle.md` — transitive cascade, plan visibility, live-attachment protection, orphan sweep |
-| D-010 | Decompose Phases 1–8 into implementable tasks | todo | D-001..D-022 | Every task has criteria, files, deps, test plan |
+| D-010 | Decompose Phases 1–8 into implementable tasks | done | D-001..D-022 | `docs/plan/phase-{1..8}-*.md` — every task has criteria, files, deps, test plan, and per-phase parallelization notes |
 
 ---
 
 ## Phase 1 — Foundations
+
+Detailed specs (files, test plans): `docs/plan/phase-1-foundations.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
@@ -57,6 +59,8 @@ describes. See `CLAUDE.md` §14 for the protocol.
 
 Built before the registry handlers, not after. Retrofitting permission filtering into
 existing queries is how disclosure bugs get shipped.
+
+Detailed specs (files, test plans): `docs/plan/phase-2-identity-rbac.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
@@ -84,6 +88,8 @@ existing queries is how disclosure bugs get shipped.
 
 ## Phase 3 — OCI registry core (hosted)
 
+Detailed specs (files, test plans): `docs/plan/phase-3-registry-core.md`
+
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
 | R-001 | Blob upload (monolithic, chunked, resumable) | todo | F-009, Z-010 | Spec-compliant; digest verified; conformance blob tests green |
@@ -102,6 +108,8 @@ existing queries is how disclosure bugs get shipped.
 ---
 
 ## Phase 4 — Proxy, cache, and groups
+
+Detailed specs (files, test plans): `docs/plan/phase-4-proxy-cache-groups.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
@@ -126,6 +134,8 @@ existing queries is how disclosure bugs get shipped.
 
 ## Phase 5 — Scanning and vulnerability assessment
 
+Detailed specs (files, test plans): `docs/plan/phase-5-scanning.md`
+
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
 | S-001 | `scan.Scanner` interface + fake impl | blocked | D-002 | No vendor import outside the adapter package |
@@ -144,6 +154,8 @@ existing queries is how disclosure bugs get shipped.
 
 ## Phase 6 — Policies, retention, GC, quotas
 
+Detailed specs (files, test plans): `docs/plan/phase-6-policy-gc-quota.md`
+
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
 | P-001 | Tag policy: immutability + prefix exceptions, protected tags | todo | R-003 | Protected beats every retention rule — adversarially tested |
@@ -160,6 +172,8 @@ existing queries is how disclosure bugs get shipped.
 ---
 
 ## Phase 7 — Events, observability, operability
+
+Detailed specs (files, test plans): `docs/plan/phase-7-events-observability.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
@@ -180,6 +194,8 @@ existing queries is how disclosure bugs get shipped.
 ---
 
 ## Phase 8 — UI, packaging, docs
+
+Detailed specs (files, test plans): `docs/plan/phase-8-ui-packaging-docs.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
