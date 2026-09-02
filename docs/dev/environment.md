@@ -9,7 +9,7 @@ locally before you push.
 
 | Tool | Version | Notes |
 |---|---|---|
-| Go | 1.23+ | `go.mod` pins the language version; newer toolchains are fine |
+| Go | 1.25+ | `go.mod` pins the language version; newer toolchains are fine |
 | golangci-lint | v1.64.8 | CI pins this exact version — match it to avoid surprises |
 | GNU Make | 4.x | On Windows, use the Git Bash shell (the Makefile sets `SHELL := /bin/bash`) |
 | Docker | any recent | Needed for `make test-linux` and, later, testcontainers-based tests |
@@ -55,7 +55,7 @@ Production is Linux; development may not be. Three rules keep that honest:
    `runtime.GOOS` and call `t.Skip` with a reason. A skipped test on Windows is
    visible; a test quietly asserting the wrong thing is not.
 2. **`make test-linux` runs everything for real.** It executes the suite inside
-   `golang:1.23-bookworm` — the Debian-based official Go image, chosen because it
+   `golang:1.25-bookworm` — the Debian-based official Go image, chosen because it
    already ships git, gcc, and make, so no custom Dockerfile is needed and it
    matches the CI runner's userland closely.
 
@@ -65,7 +65,7 @@ Production is Linux; development may not be. Three rules keep that honest:
      -v trove-gocache:/root/.cache/go-build \
      -v trove-gomodcache:/go/pkg/mod \
      -v /var/run/docker.sock:/var/run/docker.sock \
-     -w /src golang:1.23-bookworm make test
+     -w /src golang:1.25-bookworm make test
    ```
 
    The named volumes keep the Go build and module caches warm between runs (the
@@ -73,7 +73,7 @@ Production is Linux; development may not be. Three rules keep that honest:
    testcontainers-based tests can start sibling containers — MinIO, Postgres, and
    `registry:2` — from inside.
 
-   Override the image with `make test-linux LINUX_IMAGE=golang:1.23-alpine` if you
+   Override the image with `make test-linux LINUX_IMAGE=golang:1.25-alpine` if you
    ever need a different base.
 3. **CI decides.** A change is not done until Linux CI is green, whatever your
    workstation says.

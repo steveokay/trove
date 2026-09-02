@@ -225,6 +225,14 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 	delete(s.refs, name)
 	delete(s.tags, name)
 
+	// An upload into a repository that no longer exists can never complete,
+	// and while it survives it pins its digest against garbage collection.
+	for id, session := range s.uploads {
+		if session.Repository == name {
+			delete(s.uploads, id)
+		}
+	}
+
 	// Drop the repository from any group that listed it, so a stale member
 	// can never resolve.
 	for group, members := range s.members {

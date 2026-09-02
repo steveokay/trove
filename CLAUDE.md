@@ -198,8 +198,9 @@ with an import-cycle/allowlist test.
 
 ### Locked technical decisions
 
-- **Go 1.23+**, `CGO_ENABLED=0`, static binary, cross-compiled for linux/amd64,
-  linux/arm64, darwin/arm64.
+- **Go 1.25+**, `CGO_ENABLED=0`, static binary, cross-compiled for linux/amd64,
+  linux/arm64, darwin/arm64. (Raised from 1.23 on 2026-09-02 with F-006: the
+  pinned `modernc.org/sqlite` requires it. No source change was needed.)
 - **OCI distribution-spec v1.1** including the referrers API — this is how SBOMs,
   signatures, and scan attestations attach to images. Do not invent a bespoke sidecar
   table for attachments when the spec already models this.

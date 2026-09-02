@@ -938,6 +938,11 @@ func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 	}); err != nil {
 		t.Fatalf("SetGroupMembers: %v", err)
 	}
+	if err := s.CreateUpload(ctx(), meta.UploadSession{
+		ID: "upload-1", Repository: "doomed", StartedAt: testTime, LastChunkAt: testTime,
+	}); err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
 
 	if err := s.DeleteRepository(ctx(), "doomed"); err != nil {
 		t.Fatalf("DeleteRepository: %v", err)
@@ -950,6 +955,12 @@ func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 	// per repository.
 	if _, err := s.GetManifest(ctx(), "survivor", d); err != nil {
 		t.Errorf("deleting one repository removed another's manifest: %v", err)
+	}
+
+	// An upload session outliving its repository would pin its digest against
+	// garbage collection forever, and it can never be completed.
+	if _, err := s.GetUpload(ctx(), "upload-1"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("upload session survived its repository: %v", err)
 	}
 
 	// A group must not keep resolving to a repository that no longer exists.

@@ -19,7 +19,7 @@ LDFLAGS := -s -w \
 
 # Linux parity image. Debian-based official Go image: ships git, gcc and make,
 # so no custom Dockerfile is needed. See docs/dev/environment.md.
-LINUX_IMAGE ?= golang:1.23-bookworm
+LINUX_IMAGE ?= golang:1.25-bookworm
 # Docker Desktop wants a Windows-style path; pwd -W provides it under Git Bash.
 HOST_PWD := $(shell pwd -W 2>/dev/null || pwd)
 

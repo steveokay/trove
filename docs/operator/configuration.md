@@ -75,6 +75,32 @@ exactly, so `50GB` stays `50GB`.
 
 **Booleans** accept `true`/`false`. As flags they need no value: `-policy.gating-enabled`.
 
+## Database migrations
+
+Migrations are numbered, forward-only, and compiled into the binary, so an
+offline install needs nothing extra. Each one runs in its own transaction: a
+failure leaves the database at the last version that completed, never half way
+through one, and startup aborts naming the version that failed.
+
+There are no down-migrations. Recovery from a bad upgrade is restore-from-backup
+(see the operator guide), which is honest about what a down-migration actually
+delivers.
+
+| Setting | Effect |
+|---|---|
+| `database.auto_migrate: true` (default) | Pending migrations are applied on startup. |
+| `database.auto_migrate: false`, or `-no-auto-migrate` | Startup refuses a database that is behind the binary, listing the migrations it would have run. Apply them deliberately, then start. |
+
+Two states are refused rather than papered over: a database carrying a version
+this binary does not know about (an older binary pointed at a newer database),
+and a migration that would be applied after a newer one had already run.
+
+The SQLite store takes one writer at a time by design — the connection pool is
+capped at a single connection, which removes lock contention as a failure mode
+and matches the single-node posture of ADR 0018. It runs in WAL mode with
+foreign key enforcement on; trove refuses to start if foreign keys are off,
+because the schema's cascades are correctness rather than convenience.
+
 ## Notable defaults, and why
 
 | Setting | Default | Reason |
