@@ -26,6 +26,11 @@ var (
 	// ErrInvalid reports an argument the driver cannot act on, such as an
 	// upload session with no identifier.
 	ErrInvalid = errors.New("invalid argument")
+
+	// ErrNoRedirect reports that a driver cannot hand out a URL for a client
+	// to fetch directly, either because it has no such notion or because the
+	// mode is switched off. Callers fall back to streaming the blob.
+	ErrNoRedirect = errors.New("redirects are not available")
 )
 
 // NotFoundError names what was missing while satisfying errors.Is(ErrNotFound).

@@ -148,39 +148,3 @@ func TestSyncDirIsSkippedOnWindows(t *testing.T) {
 		t.Errorf("syncDir = %v, want nil: there is nothing to flush on Windows", err)
 	}
 }
-
-func TestUploadIDValidation(t *testing.T) {
-	t.Parallel()
-
-	valid := []string{
-		"01JQ8Z5K9X7YQF3M2N4P6R8T0V",
-		"upload-1",
-		"a",
-		"with.dots_and-dashes",
-		strings.Repeat("a", maxUploadIDLength),
-	}
-	for _, id := range valid {
-		if err := validUploadID(id); err != nil {
-			t.Errorf("validUploadID(%q) = %v, want nil", id, err)
-		}
-	}
-
-	invalid := []string{
-		"",
-		".",
-		"..",
-		"../escape",
-		"a/b",
-		`a\b`,
-		"a b",
-		"a\x00b",
-		"a:b",
-		"a~b",
-		strings.Repeat("a", maxUploadIDLength+1),
-	}
-	for _, id := range invalid {
-		if err := validUploadID(id); !errors.Is(err, blob.ErrInvalid) {
-			t.Errorf("validUploadID(%q) = %v, want ErrInvalid", id, err)
-		}
-	}
-}

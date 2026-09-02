@@ -120,6 +120,19 @@ type UploadSession interface {
 	Cancel(ctx context.Context) error
 }
 
+// Redirector is implemented by a driver that can hand a client a URL to fetch
+// content from directly, rather than streaming it through trove.
+//
+// It is deliberately not part of Store. A redirect skips read verification --
+// nothing checks the bytes the client receives -- so it is an opt-in an
+// operator makes for a specific driver, not a capability the registry can
+// assume it has (ADR 0007).
+type Redirector interface {
+	// RedirectURL returns a URL the client may fetch the blob from, or
+	// ErrNoRedirect when the driver has the mode switched off.
+	RedirectURL(ctx context.Context, digest Digest) (string, error)
+}
+
 // CorruptHook is called when a read finds a blob whose bytes no longer hash to
 // its digest. A driver quarantines the content and then calls the hook, which
 // is where the blob.corrupt event and the audit record come from (§8).

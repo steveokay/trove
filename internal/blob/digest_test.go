@@ -276,3 +276,43 @@ func FuzzParseDigest(f *testing.F) {
 		}
 	})
 }
+
+// The other string a caller can turn into a path component. It gets the same
+// treatment as a digest for the same reason: it arrives in a URL and ends up
+// as a filename or an object key.
+func TestValidateUploadID(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"01JQ8Z5K9X7YQF3M2N4P6R8T0V", // a ULID, which is what the registry sends
+		"upload-1",
+		"a",
+		"with.dots_and-dashes",
+		strings.Repeat("a", blob.MaxUploadIDLength),
+	}
+	for _, id := range valid {
+		if err := blob.ValidateUploadID(id); err != nil {
+			t.Errorf("ValidateUploadID(%q) = %v, want nil", id, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".",
+		"..",
+		"../escape",
+		"a/b",
+		`a\b`,
+		"a b",
+		"a\x00b",
+		"a:b",
+		"a~b",
+		"a%2Fb",
+		strings.Repeat("a", blob.MaxUploadIDLength+1),
+	}
+	for _, id := range invalid {
+		if err := blob.ValidateUploadID(id); !errors.Is(err, blob.ErrInvalid) {
+			t.Errorf("ValidateUploadID(%q) = %v, want ErrInvalid", id, err)
+		}
+	}
+}

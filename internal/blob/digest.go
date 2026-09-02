@@ -138,3 +138,37 @@ func FromBytes(algo Algorithm, data []byte) Digest {
 func digestOf(algo Algorithm, h hash.Hash) Digest {
 	return Digest(fmt.Sprintf("%s:%x", algo, h.Sum(nil)))
 }
+
+// MaxUploadIDLength bounds an identifier so it cannot exceed what a filesystem
+// or an object store will take as a name component. A ULID is 26 characters;
+// this leaves room without letting a caller build a path out of an HTTP
+// header.
+const MaxUploadIDLength = 128
+
+// ValidateUploadID is the second gate in this package, alongside the digest
+// parser, and it exists for the same reason. An upload identifier arrives from
+// a URL and becomes a filename or an object key, so it is checked the same
+// way: an allowlist of characters, no separators, and nothing that means "the
+// directory above".
+//
+// It lives here rather than in a driver because every driver needs exactly
+// this rule, and a second copy is a second chance to get it wrong.
+func ValidateUploadID(id string) error {
+	switch {
+	case id == "":
+		return Invalid("id", "must not be empty")
+	case len(id) > MaxUploadIDLength:
+		return Invalid("id", fmt.Sprintf("must be at most %d characters", MaxUploadIDLength))
+	case id == "." || id == "..":
+		return Invalid("id", "must not name a directory")
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
+		if !ok {
+			return Invalid("id", "must be letters, digits, '-', '_' or '.'")
+		}
+	}
+	return nil
+}

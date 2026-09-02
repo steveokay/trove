@@ -120,6 +120,34 @@ instead. Where two callers can now race the same create, the unique constraints
 decide it and the loser gets the same "already exists" error a single-writer
 store would have produced.
 
+## Blob storage
+
+`storage.driver` takes `fs` (the default) or `s3`. Both are content-addressed
+and both verify digests on write and on read; they differ only in where the
+bytes land.
+
+| | Filesystem | S3-compatible |
+|---|---|---|
+| Layout | `<root>/blobs/<algorithm>/<first-2>/<hex>` | `<prefix>blobs/<algorithm>/<hex>` |
+| Atomic write | staging file, fsync, rename | multipart upload completed last |
+| In-progress uploads | one staging file per session | one object per chunk |
+| Corrupt content on read | moved to `<root>/quarantine/` | copied to `<prefix>quarantine/` |
+
+Hosted and cached content are always two separate stores — two roots, or two
+key prefixes — so an eviction cannot reach a hosted blob (ADR 0009).
+
+A blob whose bytes stop matching its digest is never served. The read fails one
+byte short, so the client's own digest check fails too, and the content is
+moved out of the served tree and kept as evidence rather than deleted. Every
+such event is reported, which is what `blob.corrupt` and the audit record are
+built from.
+
+> **`storage.s3.redirect` stays off unless you mean it.** With it on, trove
+> hands the client a presigned URL and steps out of the data path — which means
+> nothing verifies the bytes the client receives, and you are relying on the
+> object store's integrity guarantees instead of trove's. It is faster and it
+> is a deliberate trade.
+
 ## Notable defaults, and why
 
 | Setting | Default | Reason |

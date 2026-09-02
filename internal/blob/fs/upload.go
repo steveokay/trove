@@ -12,38 +12,9 @@ import (
 	"github.com/steveokay/trove/internal/blob"
 )
 
-// maxUploadIDLength bounds an identifier so it cannot exceed what a filesystem
-// will take as a name. A ULID is 26 characters; this leaves room without
-// letting a caller build a path component out of an HTTP header.
-const maxUploadIDLength = 128
-
-// validUploadID is the second gate in this package, alongside the digest
-// parser. An upload identifier arrives from a URL and becomes a filename, so
-// it is checked the same way: an allowlist of characters, no separators, and
-// nothing that means "the directory above".
-func validUploadID(id string) error {
-	switch {
-	case id == "":
-		return blob.Invalid("id", "must not be empty")
-	case len(id) > maxUploadIDLength:
-		return blob.Invalid("id", fmt.Sprintf("must be at most %d characters", maxUploadIDLength))
-	case id == "." || id == "..":
-		return blob.Invalid("id", "must not name a directory")
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
-		if !ok {
-			return blob.Invalid("id", "must be letters, digits, '-', '_' or '.'")
-		}
-	}
-	return nil
-}
-
 // uploadPath returns the staging file for a session.
 func (s *Store) uploadPath(id string) (string, error) {
-	if err := validUploadID(id); err != nil {
+	if err := blob.ValidateUploadID(id); err != nil {
 		return "", err
 	}
 	return s.confine(uploadsDir, id)
