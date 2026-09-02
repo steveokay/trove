@@ -95,11 +95,30 @@ Two states are refused rather than papered over: a database carrying a version
 this binary does not know about (an older binary pointed at a newer database),
 and a migration that would be applied after a newer one had already run.
 
-The SQLite store takes one writer at a time by design — the connection pool is
-capped at a single connection, which removes lock contention as a failure mode
-and matches the single-node posture of ADR 0018. It runs in WAL mode with
-foreign key enforcement on; trove refuses to start if foreign keys are off,
-because the schema's cascades are correctness rather than convenience.
+## Choosing an engine
+
+`database.driver` takes `sqlite` (the default) or `postgres`. Both are first
+class: they run the same contract suite, and a test holds their schemas to the
+same columns and nullability, so an engine change is not a behaviour change.
+Pick SQLite unless you already run Postgres and want trove's metadata to live
+where the rest of your data does.
+
+| | SQLite | Postgres |
+|---|---|---|
+| Setup | none — a file under `data_dir` | an existing server and a database |
+| Concurrency | one writer at a time, by design | concurrent writers |
+| Backup | copy the file (in maintenance mode) plus `keys/` | your existing Postgres backups plus `keys/` |
+
+The SQLite store caps its connection pool at one connection, which removes lock
+contention as a failure mode and matches the single-node posture of ADR 0018. It
+runs in WAL mode with foreign key enforcement on; trove refuses to start if
+foreign keys are off, because the schema's cascades are correctness rather than
+convenience.
+
+The Postgres store lets the server handle concurrency and uses a small pool
+instead. Where two callers can now race the same create, the unique constraints
+decide it and the loser gets the same "already exists" error a single-writer
+store would have produced.
 
 ## Notable defaults, and why
 

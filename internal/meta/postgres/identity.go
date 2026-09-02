@@ -1,4 +1,4 @@
-package sqlite
+package postgres
 
 import (
 	"context"
@@ -43,14 +43,14 @@ func (s *Store) CreateSubject(ctx context.Context, subject meta.Subject) error {
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		nameTaken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE name = ?`, subject.Name)
+		nameTaken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE name = $1`, subject.Name)
 		if err != nil {
 			return err
 		}
 		if nameTaken {
 			return meta.Conflict("subject", subject.Name)
 		}
-		idTaken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE id = ?`, subject.ID)
+		idTaken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE id = $1`, subject.ID)
 		if err != nil {
 			return err
 		}
@@ -58,9 +58,9 @@ func (s *Store) CreateSubject(ctx context.Context, subject meta.Subject) error {
 			return meta.Conflict("subject id", subject.ID)
 		}
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO subjects (id, name, kind, disabled, created_at) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO subjects (id, name, kind, disabled, created_at) VALUES ($1, $2, $3, $4, $5)`,
 			subject.ID, subject.Name, string(subject.Kind), subject.Disabled, sqlutil.Millis(subject.CreatedAt))
-		return err
+		return asConflict(err, "subject", subject.Name)
 	})
 }
 
@@ -74,7 +74,7 @@ func (s *Store) GetSubject(ctx context.Context, name string) (meta.Subject, erro
 
 func (s *Store) subject(ctx context.Context, q sqlutil.Querier, name string) (meta.Subject, error) {
 	subject, err := scanSubject(q.QueryRowContext(ctx,
-		`SELECT id, name, kind, disabled, created_at FROM subjects WHERE name = ?`, name))
+		`SELECT id, name, kind, disabled, created_at FROM subjects WHERE name = $1`, name))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.Subject{}, meta.NotFound("subject", name)
@@ -94,7 +94,7 @@ func (s *Store) ListSubjects(ctx context.Context, opts meta.ListOptions) (meta.S
 	limit := opts.EffectiveLimit()
 	subjects, err := sqlutil.Collect(ctx, s.db,
 		`SELECT id, name, kind, disabled, created_at FROM subjects
-		 WHERE name > ? ORDER BY name LIMIT ?`,
+		 WHERE name > $1 ORDER BY name LIMIT $2`,
 		[]any{opts.Cursor, limit + 1},
 		func(rows *sql.Rows) (meta.Subject, error) { return scanSubject(rows) })
 	if err != nil {
@@ -116,7 +116,7 @@ func (s *Store) SetSubjectDisabled(ctx context.Context, name string, disabled bo
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `UPDATE subjects SET disabled = ? WHERE name = ?`, disabled, name)
+	affected, err := sqlutil.Execute(ctx, s.db, `UPDATE subjects SET disabled = $1 WHERE name = $2`, disabled, name)
 	if err != nil {
 		return err
 	}
@@ -147,11 +147,11 @@ func (s *Store) DeleteSubject(ctx context.Context, name string) error {
 		// Bindings do not: principal_id is polymorphic and carries no foreign
 		// key, so they are removed here.
 		if _, err := sqlutil.Execute(ctx, tx,
-			`DELETE FROM bindings WHERE principal_kind = ? AND principal_id = ?`,
+			`DELETE FROM bindings WHERE principal_kind = $1 AND principal_id = $2`,
 			string(meta.PrincipalSubject), subject.ID); err != nil {
 			return err
 		}
-		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM subjects WHERE name = ?`, name)
+		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM subjects WHERE name = $1`, name)
 		return err
 	})
 }
@@ -183,7 +183,7 @@ func (s *Store) CreateGroup(ctx context.Context, group meta.SubjectGroup) error 
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subject_groups WHERE name = ? OR id = ?`,
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM subject_groups WHERE name = $1 OR id = $2`,
 			group.Name, group.ID)
 		if err != nil {
 			return err
@@ -192,9 +192,9 @@ func (s *Store) CreateGroup(ctx context.Context, group meta.SubjectGroup) error 
 			return meta.Conflict("group", group.Name)
 		}
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO subject_groups (id, name, created_at) VALUES (?, ?, ?)`,
+			`INSERT INTO subject_groups (id, name, created_at) VALUES ($1, $2, $3)`,
 			group.ID, group.Name, sqlutil.Millis(group.CreatedAt))
-		return err
+		return asConflict(err, "group", group.Name)
 	})
 }
 
@@ -208,7 +208,7 @@ func (s *Store) GetGroup(ctx context.Context, name string) (meta.SubjectGroup, e
 
 func (s *Store) group(ctx context.Context, q sqlutil.Querier, name string) (meta.SubjectGroup, error) {
 	group, err := scanGroup(q.QueryRowContext(ctx,
-		`SELECT id, name, created_at FROM subject_groups WHERE name = ?`, name))
+		`SELECT id, name, created_at FROM subject_groups WHERE name = $1`, name))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.SubjectGroup{}, meta.NotFound("group", name)
@@ -241,11 +241,11 @@ func (s *Store) DeleteGroup(ctx context.Context, name string) error {
 			return err
 		}
 		if _, err := sqlutil.Execute(ctx, tx,
-			`DELETE FROM bindings WHERE principal_kind = ? AND principal_id = ?`,
+			`DELETE FROM bindings WHERE principal_kind = $1 AND principal_id = $2`,
 			string(meta.PrincipalGroup), group.ID); err != nil {
 			return err
 		}
-		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM subject_groups WHERE name = ?`, name)
+		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM subject_groups WHERE name = $1`, name)
 		return err
 	})
 }
@@ -265,7 +265,7 @@ func (s *Store) AddGroupMember(ctx context.Context, group, subject string) error
 			return err
 		}
 		_, err := sqlutil.Execute(ctx, tx,
-			`INSERT INTO group_subjects (group_name, subject_name) VALUES (?, ?)
+			`INSERT INTO group_subjects (group_name, subject_name) VALUES ($1, $2)
 			 ON CONFLICT (group_name, subject_name) DO NOTHING`,
 			group, subject)
 		return err
@@ -283,7 +283,7 @@ func (s *Store) RemoveGroupMember(ctx context.Context, group, subject string) er
 			return err
 		}
 		affected, err := sqlutil.Execute(ctx, tx,
-			`DELETE FROM group_subjects WHERE group_name = ? AND subject_name = ?`, group, subject)
+			`DELETE FROM group_subjects WHERE group_name = $1 AND subject_name = $2`, group, subject)
 		if err != nil {
 			return err
 		}
@@ -306,7 +306,7 @@ func (s *Store) ListGroupMemberSubjects(ctx context.Context, group string) ([]me
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT s.id, s.name, s.kind, s.disabled, s.created_at
 		 FROM subjects s JOIN group_subjects gs ON gs.subject_name = s.name
-		 WHERE gs.group_name = ? ORDER BY s.name`,
+		 WHERE gs.group_name = $1 ORDER BY s.name`,
 		[]any{group},
 		func(rows *sql.Rows) (meta.Subject, error) { return scanSubject(rows) })
 }
@@ -323,7 +323,7 @@ func (s *Store) ListSubjectGroups(ctx context.Context, subject string) ([]meta.S
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT g.id, g.name, g.created_at
 		 FROM subject_groups g JOIN group_subjects gs ON gs.group_name = g.name
-		 WHERE gs.subject_name = ? ORDER BY g.name`,
+		 WHERE gs.subject_name = $1 ORDER BY g.name`,
 		[]any{subject},
 		func(rows *sql.Rows) (meta.SubjectGroup, error) { return scanGroup(rows) })
 }
@@ -342,16 +342,16 @@ func (s *Store) CreateRole(ctx context.Context, role meta.Role) error {
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM roles WHERE name = ?`, role.Name)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM roles WHERE name = $1`, role.Name)
 		if err != nil {
 			return err
 		}
 		if taken {
 			return meta.Conflict("role", role.Name)
 		}
-		if _, err := sqlutil.Execute(ctx, tx, `INSERT INTO roles (name, builtin) VALUES (?, ?)`,
+		if _, err := sqlutil.Execute(ctx, tx, `INSERT INTO roles (name, builtin) VALUES ($1, $2)`,
 			role.Name, role.Builtin); err != nil {
-			return err
+			return asConflict(err, "role", role.Name)
 		}
 		return insertVerbs(ctx, tx, role.Name, role.Verbs)
 	})
@@ -362,7 +362,7 @@ func (s *Store) CreateRole(ctx context.Context, role meta.Role) error {
 func insertVerbs(ctx context.Context, tx *sql.Tx, role string, verbs []string) error {
 	for _, verb := range verbs {
 		if _, err := sqlutil.Execute(ctx, tx,
-			`INSERT INTO role_verbs (role_name, verb) VALUES (?, ?)
+			`INSERT INTO role_verbs (role_name, verb) VALUES ($1, $2)
 			 ON CONFLICT (role_name, verb) DO NOTHING`, role, verb); err != nil {
 			return err
 		}
@@ -380,7 +380,7 @@ func (s *Store) GetRole(ctx context.Context, name string) (meta.Role, error) {
 
 func (s *Store) role(ctx context.Context, q sqlutil.Querier, name string) (meta.Role, error) {
 	role := meta.Role{Name: name}
-	err := q.QueryRowContext(ctx, `SELECT name, builtin FROM roles WHERE name = ?`, name).
+	err := q.QueryRowContext(ctx, `SELECT name, builtin FROM roles WHERE name = $1`, name).
 		Scan(&role.Name, &role.Builtin)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -389,7 +389,7 @@ func (s *Store) role(ctx context.Context, q sqlutil.Querier, name string) (meta.
 		return meta.Role{}, fmt.Errorf("scan role: %w", err)
 	}
 
-	verbs, err := sqlutil.Collect(ctx, q, `SELECT verb FROM role_verbs WHERE role_name = ? ORDER BY verb`,
+	verbs, err := sqlutil.Collect(ctx, q, `SELECT verb FROM role_verbs WHERE role_name = $1 ORDER BY verb`,
 		[]any{name},
 		func(rows *sql.Rows) (string, error) {
 			var verb string
@@ -456,7 +456,7 @@ func (s *Store) UpdateRoleVerbs(ctx context.Context, name string, verbs []string
 		if role.Builtin {
 			return meta.Invalid("role", fmt.Sprintf("built-in role %q is read-only", name))
 		}
-		if _, err := sqlutil.Execute(ctx, tx, `DELETE FROM role_verbs WHERE role_name = ?`, name); err != nil {
+		if _, err := sqlutil.Execute(ctx, tx, `DELETE FROM role_verbs WHERE role_name = $1`, name); err != nil {
 			return err
 		}
 		return insertVerbs(ctx, tx, name, verbs)
@@ -478,7 +478,7 @@ func (s *Store) DeleteRole(ctx context.Context, name string) error {
 		if role.Builtin {
 			return meta.Invalid("role", fmt.Sprintf("built-in role %q cannot be deleted", name))
 		}
-		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM roles WHERE name = ?`, name)
+		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM roles WHERE name = $1`, name)
 		return err
 	})
 }
@@ -519,7 +519,7 @@ func (s *Store) CreateBinding(ctx context.Context, binding meta.Binding) error {
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM bindings WHERE id = ?`, binding.ID)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM bindings WHERE id = $1`, binding.ID)
 		if err != nil {
 			return err
 		}
@@ -540,7 +540,7 @@ func (s *Store) CreateBinding(ctx context.Context, binding meta.Binding) error {
 		// A duplicate grant adds nothing but would double-count in the
 		// explainer, so it is a conflict rather than a silent no-op.
 		duplicate, err := sqlutil.Exists(ctx, tx,
-			`SELECT 1 FROM bindings WHERE principal_kind = ? AND principal_id = ? AND role_name = ? AND scope = ?`,
+			`SELECT 1 FROM bindings WHERE principal_kind = $1 AND principal_id = $2 AND role_name = $3 AND scope = $4`,
 			string(binding.PrincipalKind), binding.PrincipalID, binding.Role, binding.Scope)
 		if err != nil {
 			return err
@@ -551,10 +551,10 @@ func (s *Store) CreateBinding(ctx context.Context, binding meta.Binding) error {
 		}
 
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO bindings (`+bindingColumns+`) VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO bindings (`+bindingColumns+`) VALUES ($1, $2, $3, $4, $5, $6)`,
 			binding.ID, string(binding.PrincipalKind), binding.PrincipalID,
 			binding.Role, binding.Scope, sqlutil.Millis(binding.CreatedAt))
-		return err
+		return asConflict(err, "binding", binding.ID)
 	})
 }
 
@@ -562,9 +562,9 @@ func (s *Store) CreateBinding(ctx context.Context, binding meta.Binding) error {
 func principalExists(ctx context.Context, tx *sql.Tx, kind meta.PrincipalKind, id string) (bool, error) {
 	switch kind {
 	case meta.PrincipalGroup:
-		return sqlutil.Exists(ctx, tx, `SELECT 1 FROM subject_groups WHERE id = ?`, id)
+		return sqlutil.Exists(ctx, tx, `SELECT 1 FROM subject_groups WHERE id = $1`, id)
 	default:
-		return sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE id = ?`, id)
+		return sqlutil.Exists(ctx, tx, `SELECT 1 FROM subjects WHERE id = $1`, id)
 	}
 }
 
@@ -575,7 +575,7 @@ func (s *Store) GetBinding(ctx context.Context, id string) (meta.Binding, error)
 	}
 
 	binding, err := scanBinding(s.db.QueryRowContext(ctx,
-		`SELECT `+bindingColumns+` FROM bindings WHERE id = ?`, id))
+		`SELECT `+bindingColumns+` FROM bindings WHERE id = $1`, id))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.Binding{}, meta.NotFound("binding", id)
@@ -602,7 +602,7 @@ func (s *Store) DeleteBinding(ctx context.Context, id string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM bindings WHERE id = ?`, id)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM bindings WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -636,13 +636,13 @@ func (s *Store) ListEffectiveBindings(ctx context.Context, subjectName string) (
 		        b.role_name AS role_name, b.scope AS scope, b.created_at AS created_at, '' AS via_group
 		   FROM bindings b
 		   JOIN subjects s ON s.id = b.principal_id
-		  WHERE b.principal_kind = 'subject' AND s.name = ?
+		  WHERE b.principal_kind = 'subject' AND s.name = $1
 		 UNION ALL
 		 SELECT b.id, b.principal_kind, b.principal_id, b.role_name, b.scope, b.created_at, g.name
 		   FROM bindings b
 		   JOIN subject_groups g ON g.id = b.principal_id
 		   JOIN group_subjects gs ON gs.group_name = g.name
-		  WHERE b.principal_kind = 'group' AND gs.subject_name = ?
+		  WHERE b.principal_kind = 'group' AND gs.subject_name = $2
 		 ORDER BY id`,
 		[]any{subjectName, subjectName},
 		func(rows *sql.Rows) (meta.EffectiveBinding, error) {

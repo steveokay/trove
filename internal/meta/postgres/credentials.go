@@ -1,4 +1,4 @@
-package sqlite
+package postgres
 
 import (
 	"context"
@@ -30,7 +30,7 @@ func (s *Store) PutUserCredential(ctx context.Context, cred meta.UserCredential)
 		}
 		_, err := sqlutil.Execute(ctx, tx,
 			`INSERT INTO user_credentials (subject_name, hash, must_rotate, rotated_at)
-			 VALUES (?, ?, ?, ?)
+			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (subject_name) DO UPDATE SET
 			     hash = excluded.hash,
 			     must_rotate = excluded.must_rotate,
@@ -52,7 +52,7 @@ func (s *Store) GetUserCredential(ctx context.Context, subject string) (meta.Use
 		rotated sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT subject_name, hash, must_rotate, rotated_at FROM user_credentials WHERE subject_name = ?`,
+		`SELECT subject_name, hash, must_rotate, rotated_at FROM user_credentials WHERE subject_name = $1`,
 		subject).Scan(&cred.Subject, &cred.Hash, &cred.MustRotate, &rotated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -71,7 +71,7 @@ func (s *Store) DeleteUserCredential(ctx context.Context, subject string) error 
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM user_credentials WHERE subject_name = ?`, subject)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM user_credentials WHERE subject_name = $1`, subject)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func (s *Store) PutRobotCredential(ctx context.Context, cred meta.RobotCredentia
 		}
 		_, err = sqlutil.Execute(ctx, tx,
 			`INSERT INTO robot_credentials (subject_name, secret_hash, expires_at, rotated_at)
-			 VALUES (?, ?, ?, ?)
+			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (subject_name) DO UPDATE SET
 			     secret_hash = excluded.secret_hash,
 			     expires_at = excluded.expires_at,
@@ -131,7 +131,7 @@ func (s *Store) GetRobotCredential(ctx context.Context, subject string, now time
 		rotated sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT subject_name, secret_hash, expires_at, rotated_at FROM robot_credentials WHERE subject_name = ?`,
+		`SELECT subject_name, secret_hash, expires_at, rotated_at FROM robot_credentials WHERE subject_name = $1`,
 		subject).Scan(&cred.Subject, &cred.SecretHash, &expires, &rotated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -155,7 +155,7 @@ func (s *Store) DeleteRobotCredential(ctx context.Context, subject string) error
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM robot_credentials WHERE subject_name = ?`, subject)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM robot_credentials WHERE subject_name = $1`, subject)
 	if err != nil {
 		return err
 	}
@@ -203,7 +203,7 @@ func (s *Store) CreateAccessToken(ctx context.Context, token meta.AccessToken) e
 		if _, err := s.subject(ctx, tx, token.Subject); err != nil {
 			return err
 		}
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM access_tokens WHERE id = ?`, token.ID)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM access_tokens WHERE id = $1`, token.ID)
 		if err != nil {
 			return err
 		}
@@ -212,7 +212,7 @@ func (s *Store) CreateAccessToken(ctx context.Context, token meta.AccessToken) e
 		}
 		// Two records with the same digest would make authentication
 		// ambiguous: whichever the store happened to return would win.
-		registered, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM access_tokens WHERE token_hash = ?`, token.TokenHash)
+		registered, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM access_tokens WHERE token_hash = $1`, token.TokenHash)
 		if err != nil {
 			return err
 		}
@@ -221,10 +221,10 @@ func (s *Store) CreateAccessToken(ctx context.Context, token meta.AccessToken) e
 		}
 
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO access_tokens (`+accessTokenColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO access_tokens (`+accessTokenColumns+`) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			token.ID, token.Subject, token.Name, token.TokenHash,
 			sqlutil.Millis(token.CreatedAt), sqlutil.Millis(token.ExpiresAt), sqlutil.Millis(token.LastUsedAt))
-		return err
+		return asConflict(err, "access token", token.ID)
 	})
 }
 
@@ -239,7 +239,7 @@ func (s *Store) GetAccessTokenByHash(ctx context.Context, hash []byte, now time.
 	}
 
 	token, err := scanAccessToken(s.db.QueryRowContext(ctx,
-		`SELECT `+accessTokenColumns+` FROM access_tokens WHERE token_hash = ?`, hash))
+		`SELECT `+accessTokenColumns+` FROM access_tokens WHERE token_hash = $1`, hash))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.AccessToken{}, meta.NotFound("access token", "presented token")
@@ -265,7 +265,7 @@ func (s *Store) ListAccessTokens(ctx context.Context, subject string) ([]meta.Ac
 	}
 
 	return sqlutil.Collect(ctx, s.db,
-		`SELECT `+accessTokenColumns+` FROM access_tokens WHERE subject_name = ? ORDER BY name, id`,
+		`SELECT `+accessTokenColumns+` FROM access_tokens WHERE subject_name = $1 ORDER BY name, id`,
 		[]any{subject},
 		func(rows *sql.Rows) (meta.AccessToken, error) { return scanAccessToken(rows) })
 }
@@ -277,7 +277,7 @@ func (s *Store) TouchAccessToken(ctx context.Context, id string, at time.Time) e
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `UPDATE access_tokens SET last_used_at = ? WHERE id = ?`,
+	affected, err := sqlutil.Execute(ctx, s.db, `UPDATE access_tokens SET last_used_at = $1 WHERE id = $2`,
 		sqlutil.Millis(at), id)
 	if err != nil {
 		return err
@@ -294,7 +294,7 @@ func (s *Store) DeleteAccessToken(ctx context.Context, id string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM access_tokens WHERE id = ?`, id)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM access_tokens WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,7 @@ func (s *Store) CreateSession(ctx context.Context, session meta.Session) error {
 		if _, err := s.subject(ctx, tx, session.Subject); err != nil {
 			return err
 		}
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM sessions WHERE id = ?`, session.ID)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM sessions WHERE id = $1`, session.ID)
 		if err != nil {
 			return err
 		}
@@ -353,10 +353,10 @@ func (s *Store) CreateSession(ctx context.Context, session meta.Session) error {
 			return meta.Conflict("session", session.ID)
 		}
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO sessions (`+sessionColumns+`) VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO sessions (`+sessionColumns+`) VALUES ($1, $2, $3, $4, $5, $6)`,
 			session.ID, session.Subject, session.CSRFToken, sqlutil.Millis(session.CreatedAt),
 			session.IdleExpiresAt.UTC().UnixMilli(), session.AbsoluteExpiresAt.UTC().UnixMilli())
-		return err
+		return asConflict(err, "session", session.ID)
 	})
 }
 
@@ -368,7 +368,7 @@ func (s *Store) GetSession(ctx context.Context, id string, now time.Time) (meta.
 	}
 
 	session, err := scanSession(s.db.QueryRowContext(ctx,
-		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id))
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.Session{}, meta.NotFound("session", id)
@@ -390,14 +390,14 @@ func (s *Store) RefreshSession(ctx context.Context, id string, idleExpiresAt tim
 	}
 
 	_, err := sqlutil.Execute(ctx, s.db,
-		`UPDATE sessions SET idle_expires_at = min(?, absolute_expires_at) WHERE id = ?`,
+		`UPDATE sessions SET idle_expires_at = LEAST($1, absolute_expires_at) WHERE id = $2`,
 		idleExpiresAt.UTC().UnixMilli(), id)
 	if err != nil {
 		return err
 	}
 	// RowsAffected reports zero for an update that changed nothing, so
 	// existence is asked separately rather than inferred from it.
-	found, err := sqlutil.Exists(ctx, s.db, `SELECT 1 FROM sessions WHERE id = ?`, id)
+	found, err := sqlutil.Exists(ctx, s.db, `SELECT 1 FROM sessions WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -413,7 +413,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM sessions WHERE id = ?`, id)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM sessions WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -431,7 +431,7 @@ func (s *Store) DeleteSubjectSessions(ctx context.Context, subject string) (int,
 		return 0, err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM sessions WHERE subject_name = ?`, subject)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM sessions WHERE subject_name = $1`, subject)
 	return int(affected), err
 }
 
@@ -444,7 +444,7 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, before time.Time) (in
 
 	cutoff := before.UTC().UnixMilli()
 	affected, err := sqlutil.Execute(ctx, s.db,
-		`DELETE FROM sessions WHERE idle_expires_at <= ? OR absolute_expires_at <= ?`,
+		`DELETE FROM sessions WHERE idle_expires_at <= $1 OR absolute_expires_at <= $2`,
 		cutoff, cutoff)
 	return int(affected), err
 }

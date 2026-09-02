@@ -1,4 +1,4 @@
-package sqlite
+package postgres
 
 import (
 	"embed"
@@ -12,15 +12,15 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// dialect is SQLite's half of the shared migration runner: the ledger table
+// dialect is Postgres's half of the shared migration runner: the ledger table
 // and the two statements that touch it. Everything else about applying a
 // migration is engine-neutral and lives in internal/meta/migrate.
 var dialect = migrate.Dialect{
 	CreateLedger: `
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
-    applied_at INTEGER NOT NULL
+    applied_at BIGINT NOT NULL
 )`,
 	SelectVersions: `SELECT version FROM schema_migrations ORDER BY version`,
-	InsertVersion:  `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+	InsertVersion:  `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)`,
 }

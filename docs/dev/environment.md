@@ -12,7 +12,7 @@ locally before you push.
 | Go | 1.25+ | `go.mod` pins the language version; newer toolchains are fine |
 | golangci-lint | v1.64.8 | CI pins this exact version — match it to avoid surprises |
 | GNU Make | 4.x | On Windows, use the Git Bash shell (the Makefile sets `SHELL := /bin/bash`) |
-| Docker | any recent | Needed for `make test-linux` and, later, testcontainers-based tests |
+| Docker | any recent | Needed for `make test` (the Postgres contract suite) and `make test-linux` |
 | Node + pnpm | Node 20+ | Only for the web UI, from task U-001 onward |
 
 ## Everyday commands
@@ -27,6 +27,21 @@ make lint             # go vet + golangci-lint
 make test-linux       # full suite inside a Linux container (see below)
 make help             # list every target
 ```
+
+## Tests that need Docker
+
+From F-007 the Postgres store runs the shared contract suite against a real
+Postgres in a testcontainers-managed container (`postgres:17-alpine`, pulled
+once, one container per package run, one database per test).
+
+Without a reachable Docker daemon those tests **skip** locally and **fail** in
+CI, where `CI` is set. The skip is not a way to avoid them: the coverage gate
+counts the Postgres package like any other, so a skipped run drops well below
+the threshold and fails anyway. If you cannot run Docker, push and let CI be
+the judge.
+
+The SQLite suite needs nothing: it is a pure-Go driver writing to a temporary
+file.
 
 ## The coverage gate
 

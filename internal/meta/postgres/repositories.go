@@ -1,4 +1,4 @@
-package sqlite
+package postgres
 
 import (
 	"context"
@@ -46,7 +46,7 @@ func (s *Store) CreateRepository(ctx context.Context, repo meta.Repository) (met
 	stored := repo
 	stored.ConfigVersion = 1
 	err := sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM repositories WHERE name = ?`, repo.Name)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM repositories WHERE name = $1`, repo.Name)
 		if err != nil {
 			return err
 		}
@@ -54,9 +54,9 @@ func (s *Store) CreateRepository(ctx context.Context, repo meta.Repository) (met
 			return meta.Conflict("repository", repo.Name)
 		}
 		_, err = sqlutil.Execute(ctx, tx,
-			`INSERT INTO repositories (`+repositoryColumns+`) VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO repositories (`+repositoryColumns+`) VALUES ($1, $2, $3, $4, $5, $6)`,
 			repo.Name, string(repo.Type), []byte(repo.Config), 1, sqlutil.Millis(repo.CreatedAt), sqlutil.Millis(repo.UpdatedAt))
-		return err
+		return asConflict(err, "repository", repo.Name)
 	})
 	if err != nil {
 		return meta.Repository{}, err
@@ -74,7 +74,7 @@ func (s *Store) GetRepository(ctx context.Context, name string) (meta.Repository
 
 func (s *Store) repository(ctx context.Context, q sqlutil.Querier, name string) (meta.Repository, error) {
 	repo, err := scanRepository(q.QueryRowContext(ctx,
-		`SELECT `+repositoryColumns+` FROM repositories WHERE name = ?`, name))
+		`SELECT `+repositoryColumns+` FROM repositories WHERE name = $1`, name))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.Repository{}, meta.NotFound("repository", name)
@@ -91,12 +91,17 @@ func (s *Store) ListRepositories(ctx context.Context, opts meta.ListOptions) (me
 		return meta.RepositoryPage{}, err
 	}
 
-	where, args := sqlutil.VisibilityClause("name", opts.Visibility, sqlutil.Question, 1)
+	// The scope filter numbers its own parameters, so the cursor and the limit
+	// continue from wherever it stopped.
+	where, args := sqlutil.VisibilityClause("name", opts.Visibility, sqlutil.Dollar, 1)
 	limit := opts.EffectiveLimit()
+	cursorArg := sqlutil.Dollar(len(args) + 1)
+	limitArg := sqlutil.Dollar(len(args) + 2)
 	args = append(args, opts.Cursor, limit+1)
 
 	repos, err := sqlutil.Collect(ctx, s.db,
-		`SELECT `+repositoryColumns+` FROM repositories WHERE `+where+` AND name > ? ORDER BY name LIMIT ?`,
+		`SELECT `+repositoryColumns+` FROM repositories
+		 WHERE `+where+` AND name > `+cursorArg+` ORDER BY name LIMIT `+limitArg,
 		args, scanRepositoryRow)
 	if err != nil {
 		return meta.RepositoryPage{}, err
@@ -130,7 +135,7 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 				meta.ErrStale, name, current.ConfigVersion, expectedVersion)
 		}
 		if _, err := sqlutil.Execute(ctx, tx,
-			`UPDATE repositories SET config = ?, config_version = config_version + 1 WHERE name = ?`,
+			`UPDATE repositories SET config = $1, config_version = config_version + 1 WHERE name = $2`,
 			config, name); err != nil {
 			return err
 		}
@@ -152,7 +157,7 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM repositories WHERE name = ?`, name)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM repositories WHERE name = $1`, name)
 	if err != nil {
 		return err
 	}
@@ -180,13 +185,13 @@ func (s *Store) SetGroupMembers(ctx context.Context, group string, members []met
 			return err
 		}
 
-		if _, err := sqlutil.Execute(ctx, tx, `DELETE FROM group_members WHERE group_name = ?`, group); err != nil {
+		if _, err := sqlutil.Execute(ctx, tx, `DELETE FROM group_members WHERE group_name = $1`, group); err != nil {
 			return err
 		}
 		for _, m := range members {
 			if _, err := sqlutil.Execute(ctx, tx,
 				`INSERT INTO group_members (group_name, member_name, position, required, write_target)
-				 VALUES (?, ?, ?, ?, ?)`,
+				 VALUES ($1, $2, $3, $4, $5)`,
 				group, m.Repository, m.Position, m.Required, m.WriteTarget); err != nil {
 				return err
 			}
@@ -238,7 +243,7 @@ func (s *Store) ListGroupMembers(ctx context.Context, group string) ([]meta.Grou
 
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT member_name, position, required, write_target
-		 FROM group_members WHERE group_name = ? ORDER BY position`,
+		 FROM group_members WHERE group_name = $1 ORDER BY position`,
 		[]any{group},
 		func(rows *sql.Rows) (meta.GroupMember, error) {
 			var m meta.GroupMember

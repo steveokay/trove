@@ -15,12 +15,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/steveokay/trove/internal/meta"
+	"github.com/steveokay/trove/internal/meta/migrate"
 
 	// The pure-Go SQLite driver, registered as "sqlite".
 	_ "modernc.org/sqlite"
@@ -109,40 +108,19 @@ func prepare(ctx context.Context, db *sql.DB, opts Options, now func() time.Time
 		return nil, errors.New("foreign key enforcement is off: the schema's cascades would silently not happen")
 	}
 
-	all, err := loadMigrations(migrationFiles)
+	all, err := migrate.Load(migrationFiles)
 	if err != nil {
 		return nil, err
 	}
 	if opts.NoAutoMigrate {
-		if err := checkAtHead(ctx, db, all); err != nil {
+		if err := migrate.CheckAtHead(ctx, db, dialect, all); err != nil {
 			return nil, err
 		}
-	} else if _, err := migrate(ctx, db, all, now()); err != nil {
+	} else if _, err := migrate.Apply(ctx, db, dialect, all, now()); err != nil {
 		return nil, err
 	}
 
 	return &Store{db: db}, nil
-}
-
-// checkAtHead reports whether every embedded migration is already applied,
-// naming what is missing so the operator can run it deliberately.
-func checkAtHead(ctx context.Context, db *sql.DB, all []migration) error {
-	applied, err := appliedVersions(ctx, db)
-	if err != nil {
-		return err
-	}
-	todo, err := pending(applied, all)
-	if err != nil {
-		return err
-	}
-	if len(todo) == 0 {
-		return nil
-	}
-	versions := make([]string, len(todo))
-	for i, m := range todo {
-		versions[i] = fmt.Sprintf("%04d_%s", m.version, m.name)
-	}
-	return fmt.Errorf("%w: %s", ErrMigrationsPending, strings.Join(versions, ", "))
 }
 
 // dsn builds the driver DSN. The pragmas are per connection, so they belong in
@@ -181,144 +159,4 @@ func (s *Store) ready(ctx context.Context) error {
 		return errClosed
 	}
 	return nil
-}
-
-// --- SQL helpers ---
-//
-// Error handling funnels through these four so the package has a handful of
-// wrap sites rather than one per statement.
-
-// querier is the part of *sql.DB and *sql.Tx this package uses.
-type querier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// collect runs a query and scans every row.
-func collect[T any](ctx context.Context, q querier, query string, args []any, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []T
-	for rows.Next() {
-		v, err := scan(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows: %w", err)
-	}
-	return out, nil
-}
-
-// exists reports whether a query matches any row. The query must select a
-// single column.
-func exists(ctx context.Context, q querier, query string, args ...any) (bool, error) {
-	var probe int
-	err := q.QueryRowContext(ctx, query, args...).Scan(&probe)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	case err != nil:
-		return false, fmt.Errorf("query: %w", err)
-	default:
-		return true, nil
-	}
-}
-
-// execute runs a statement and reports how many rows it changed.
-func execute(ctx context.Context, q querier, query string, args ...any) (int64, error) {
-	result, err := q.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("exec: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("rows affected: %w", err)
-	}
-	return affected, nil
-}
-
-// inTx runs fn in a transaction, rolling back unless it returns nil. Every
-// multi-statement operation goes through it: a manifest without its reference
-// edges, or a subject without its bindings removed, is a corrupt state that
-// nothing downstream can detect.
-func (s *Store) inTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := fn(tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
-}
-
-// --- value conversion ---
-
-// millis converts a time to UTC epoch milliseconds, mapping the zero time to
-// NULL so "unset" stays distinguishable from "the epoch".
-func millis(t time.Time) sql.NullInt64 {
-	if t.IsZero() {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: t.UTC().UnixMilli(), Valid: true}
-}
-
-// asTime converts a stored timestamp back, in UTC.
-func asTime(v sql.NullInt64) time.Time {
-	if !v.Valid {
-		return time.Time{}
-	}
-	return time.UnixMilli(v.Int64).UTC()
-}
-
-// visibilityClause compiles a Visibility into a SQL predicate over the given
-// column, plus its arguments. Filtering happens in the query and nowhere else:
-// a handler-side filter leaks through counts and pagination (ADR 0003).
-//
-// The predicate is assembled from literal fragments and the column name chosen
-// by the caller; every value is bound, never interpolated.
-func visibilityClause(column string, v meta.Visibility) (string, []any) {
-	if v.IsUnrestricted() {
-		return "1 = 1", nil
-	}
-
-	var (
-		clauses []string
-		args    []any
-	)
-	for _, f := range v.Filters() {
-		switch {
-		case f.All:
-			return "1 = 1", nil
-		case f.Exact != "":
-			clauses = append(clauses, column+" = ?")
-			args = append(args, f.Exact)
-		case f.Prefix != "":
-			// Matches ScopeFilter.Matches: the name must be under the prefix,
-			// not equal to it, so "team-a/" never selects a repository called
-			// "team-a/".
-			clauses = append(clauses, "(substr("+column+", 1, ?) = ? AND length("+column+") > ?)")
-			n := utf8.RuneCountInString(f.Prefix)
-			args = append(args, n, f.Prefix, n)
-		}
-	}
-	if len(clauses) == 0 {
-		// No filters means no visibility. This is the case a nil slice would
-		// have quietly turned into "everything".
-		return "1 = 0", nil
-	}
-	return "(" + strings.Join(clauses, " OR ") + ")", args
 }

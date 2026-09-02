@@ -1,9 +1,8 @@
-package sqlite_test
+package postgres
 
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,26 +11,23 @@ import (
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/metatest"
 	"github.com/steveokay/trove/internal/meta/migrate"
-	"github.com/steveokay/trove/internal/meta/sqlite"
 )
 
 var testTime = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
-// open builds a store on a fresh database file. A file rather than ":memory:"
-// on purpose: the file path is the one operators use, and it is the only one
-// that exercises WAL and reopening.
-func open(t *testing.T, opts ...func(*sqlite.Options)) *sqlite.Store {
+// open builds a store on a fresh database inside the shared container.
+func open(t *testing.T, opts ...func(*Options)) *Store {
 	t.Helper()
 
-	options := sqlite.Options{
-		Path: filepath.Join(t.TempDir(), "trove.db"),
-		Now:  func() time.Time { return testTime },
+	options := Options{
+		DSN: requireDSN(t),
+		Now: func() time.Time { return testTime },
 	}
 	for _, apply := range opts {
 		apply(&options)
 	}
 
-	store, err := sqlite.Open(context.Background(), options)
+	store, err := Open(context.Background(), options)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -43,8 +39,9 @@ func open(t *testing.T, opts ...func(*sqlite.Options)) *sqlite.Store {
 	return store
 }
 
-// The database-backed store must satisfy the same contract as the in-memory
-// reference implementation, unmodified.
+// The Postgres store must satisfy the same contract as SQLite and the
+// in-memory reference, unmodified. An engine that needed its own version of
+// the suite would not be substitutable, which is the only reason to have two.
 func TestContract(t *testing.T) {
 	t.Parallel()
 
@@ -57,31 +54,45 @@ func TestContract(t *testing.T) {
 // Behaviour specific to this implementation, which the shared contract does
 // not cover.
 
-func TestOpenRequiresAPath(t *testing.T) {
+func TestOpenRequiresADSN(t *testing.T) {
 	t.Parallel()
 
-	_, err := sqlite.Open(context.Background(), sqlite.Options{})
+	_, err := Open(context.Background(), Options{})
 	if !errors.Is(err, meta.ErrInvalid) {
-		t.Errorf("Open without a path = %v, want ErrInvalid", err)
+		t.Errorf("Open without a DSN = %v, want ErrInvalid", err)
 	}
 }
 
-func TestOpenFailsOnAnUnusablePath(t *testing.T) {
+func TestOpenFailsOnAnUnreachableServer(t *testing.T) {
 	t.Parallel()
 
-	// A directory where the file should be: the driver cannot open it, and
-	// refusing to start beats starting with no storage.
-	dir := t.TempDir()
-	if _, err := sqlite.Open(context.Background(), sqlite.Options{Path: dir}); err == nil {
-		t.Error("Open on a directory succeeded, want an error")
+	// sql.Open is lazy, so the store must reach out during Open: a connection
+	// failure surfacing on the first request instead would be reported
+	// somewhere unrelated, long after the operator could act on it.
+	_, err := Open(context.Background(), Options{
+		DSN: "postgres://trove:trove@127.0.0.1:1/trove?sslmode=disable&connect_timeout=2",
+	})
+	if err == nil {
+		t.Fatal("Open against an unreachable server succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "connect") {
+		t.Errorf("error = %v, want it to name the connection attempt", err)
+	}
+}
+
+func TestOpenRejectsAMalformedDSN(t *testing.T) {
+	t.Parallel()
+
+	if _, err := Open(context.Background(), Options{DSN: "://not a dsn"}); err == nil {
+		t.Error("Open with a malformed DSN succeeded, want an error")
 	}
 }
 
 func TestOpenAppliesMigrationsOnce(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "trove.db")
-	first := open(t, func(o *sqlite.Options) { o.Path = path })
+	dsn := requireDSN(t)
+	first := open(t, func(o *Options) { o.DSN = dsn })
 	if _, err := first.CreateRepository(context.Background(), meta.Repository{
 		Name: "team-a/api", Type: meta.Hosted,
 	}); err != nil {
@@ -93,7 +104,7 @@ func TestOpenAppliesMigrationsOnce(t *testing.T) {
 
 	// Reopening an already-migrated database must be a no-op that keeps the
 	// data, not a second attempt at the same migration.
-	second := open(t, func(o *sqlite.Options) { o.Path = path })
+	second := open(t, func(o *Options) { o.DSN = dsn })
 	if _, err := second.GetRepository(context.Background(), "team-a/api"); err != nil {
 		t.Errorf("data did not survive a reopen: %v", err)
 	}
@@ -102,23 +113,23 @@ func TestOpenAppliesMigrationsOnce(t *testing.T) {
 func TestNoAutoMigrateRefusesAnUnmigratedDatabase(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "trove.db")
-	_, err := sqlite.Open(context.Background(), sqlite.Options{Path: path, NoAutoMigrate: true})
+	dsn := requireDSN(t)
+	_, err := Open(context.Background(), Options{DSN: dsn, NoAutoMigrate: true})
 	if !errors.Is(err, migrate.ErrPending) {
 		t.Fatalf("Open with NoAutoMigrate = %v, want migrate.ErrPending", err)
 	}
 	// The error names what is missing, so the operator knows what they are
 	// being asked to run.
-	if got := err.Error(); !strings.Contains(got, "0001_init") {
-		t.Errorf("error %q does not name the pending migration", got)
+	if !strings.Contains(err.Error(), "0001_init") {
+		t.Errorf("error %q does not name the pending migration", err)
 	}
 
 	// Once migrated, the same option opens cleanly.
-	migrated := open(t, func(o *sqlite.Options) { o.Path = path })
+	migrated := open(t, func(o *Options) { o.DSN = dsn })
 	if err := migrated.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	staged, err := sqlite.Open(context.Background(), sqlite.Options{Path: path, NoAutoMigrate: true})
+	staged, err := Open(context.Background(), Options{DSN: dsn, NoAutoMigrate: true})
 	if err != nil {
 		t.Fatalf("Open with NoAutoMigrate on a migrated database: %v", err)
 	}
@@ -128,7 +139,7 @@ func TestNoAutoMigrateRefusesAnUnmigratedDatabase(t *testing.T) {
 }
 
 // A closed store must refuse every method rather than serving from a
-// torn-down handle.
+// torn-down pool.
 func TestClosedStoreRefusesEveryMethod(t *testing.T) {
 	t.Parallel()
 
@@ -151,7 +162,7 @@ func TestClosedStoreRefusesEveryMethod(t *testing.T) {
 }
 
 // Timestamps are stored as epoch milliseconds, so they must come back equal
-// and in UTC rather than in whatever zone the caller supplied.
+// and in UTC rather than in whatever zone the caller or the server uses.
 func TestTimestampsRoundTripInUTC(t *testing.T) {
 	t.Parallel()
 
@@ -190,35 +201,77 @@ func TestTimestampsRoundTripInUTC(t *testing.T) {
 	}
 }
 
-func TestConcurrentAccessIsSafe(t *testing.T) {
+// Repository config is opaque and must survive byte for byte. This is why the
+// column is BYTEA and not JSONB: JSONB would rewrite key order and whitespace,
+// so two engines would hand back different bytes for the same input.
+func TestRepositoryConfigIsStoredVerbatim(t *testing.T) {
 	t.Parallel()
 
 	store := open(t)
 	ctx := context.Background()
-	if _, err := store.CreateRepository(ctx, meta.Repository{Name: "repo", Type: meta.Hosted}); err != nil {
+	config := []byte(`{"b":1,   "a":  [2,3]}`)
+
+	if _, err := store.CreateRepository(ctx, meta.Repository{
+		Name: "verbatim", Type: meta.Proxy, Config: config,
+	}); err != nil {
 		t.Fatalf("CreateRepository: %v", err)
 	}
+	got, err := store.GetRepository(ctx, "verbatim")
+	if err != nil {
+		t.Fatalf("GetRepository: %v", err)
+	}
+	if string(got.Config) != string(config) {
+		t.Errorf("config = %s, want it byte for byte: %s", got.Config, config)
+	}
+}
 
-	// SQLite takes one writer at a time; concurrent callers must queue rather
-	// than fail, and the race detector must stay quiet.
-	const workers = 8
-	var wg sync.WaitGroup
+// Postgres serves concurrent writers, so unlike SQLite the store does not
+// serialise them. Two callers racing the same create must still see one
+// success and one ErrConflict, never a driver error the caller cannot match on.
+func TestConcurrentCreatesResolveToOneConflict(t *testing.T) {
+	t.Parallel()
+
+	store := open(t)
+	ctx := context.Background()
+
+	const workers = 6
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		succeeded int
+		conflicts int
+		other     []error
+	)
+	start := make(chan struct{})
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
+			<-start
 
-			d := meta.Digest("sha256:" + string(rune('a'+i)))
-			if err := store.PutBlob(ctx, meta.Blob{Digest: d, Size: int64(i)}); err != nil {
-				t.Errorf("PutBlob: %v", err)
+			_, err := store.CreateRepository(ctx, meta.Repository{Name: "contested", Type: meta.Hosted})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				succeeded++
+			case errors.Is(err, meta.ErrConflict):
+				conflicts++
+			default:
+				other = append(other, err)
 			}
-			if _, err := store.GetBlob(ctx, d); err != nil {
-				t.Errorf("GetBlob: %v", err)
-			}
-			if _, err := store.ListRepositories(ctx, meta.ListOptions{Visibility: meta.Unrestricted()}); err != nil {
-				t.Errorf("ListRepositories: %v", err)
-			}
-		}(i)
+		}()
 	}
+	close(start)
 	wg.Wait()
+
+	if succeeded != 1 {
+		t.Errorf("%d creates succeeded, want exactly 1", succeeded)
+	}
+	if conflicts != workers-1 {
+		t.Errorf("%d conflicts, want %d", conflicts, workers-1)
+	}
+	if len(other) > 0 {
+		t.Errorf("unexpected errors: %v", other)
+	}
 }

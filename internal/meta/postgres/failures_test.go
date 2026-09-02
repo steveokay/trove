@@ -1,51 +1,30 @@
-package sqlite
+package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/metatest"
 )
 
-var failureTestTime = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-
 // A store whose database has failed must say so. Returning a zero value and a
 // nil error would read as "no such repository" or "no bindings", which is how
 // a broken database turns into a silent authorization or deletion bug.
 
-// openInternal opens a store from inside the package, so a test can reach the
-// handle and break it deliberately.
-func openInternal(t *testing.T) *Store {
-	t.Helper()
-
-	store, err := Open(context.Background(), Options{
-		Path: filepath.Join(t.TempDir(), "trove.db"),
-		Now:  func() time.Time { return failureTestTime },
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-	})
-	return store
-}
-
-// TestEveryMethodSurfacesADeadDatabase closes the handle without closing the
+// TestEveryMethodSurfacesADeadDatabase closes the pool without closing the
 // store, so every method gets past its open check and then fails on its first
 // statement.
 func TestEveryMethodSurfacesADeadDatabase(t *testing.T) {
 	t.Parallel()
 
-	store := openInternal(t)
+	store := open(t)
 	if err := store.db.Close(); err != nil {
-		t.Fatalf("close handle: %v", err)
+		t.Fatalf("close pool: %v", err)
 	}
 
 	calls := metatest.Calls(context.Background(), store)
@@ -78,7 +57,7 @@ var cancelDigest = meta.Digest(fmt.Sprintf("sha256:%064x", []byte("cancel")))
 func seedBroken(t *testing.T) *Store {
 	t.Helper()
 
-	store := openInternal(t)
+	store := open(t)
 	ctx := context.Background()
 
 	// A group repository, so the member-list methods get past their type check.
@@ -109,7 +88,7 @@ func seedBroken(t *testing.T) *Store {
 
 // TestMethodsSurfaceFailuresAfterTheirFirstQuery covers the half of each
 // method that runs once its lookups have succeeded: the write, the join, or
-// the second read that a dead handle never reaches.
+// the second read that a dead pool never reaches.
 func TestMethodsSurfaceFailuresAfterTheirFirstQuery(t *testing.T) {
 	t.Parallel()
 
@@ -125,11 +104,9 @@ func TestMethodsSurfaceFailuresAfterTheirFirstQuery(t *testing.T) {
 		"CreateAccessToken", "ListAccessTokens", "CreateSession",
 	}
 
+	store := seedBroken(t)
 	for _, name := range methods {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			store := seedBroken(t)
 			call, ok := callByName(metatest.Calls(context.Background(), store), name)
 			if !ok {
 				t.Fatalf("%s is not in the contract's call table", name)
@@ -150,6 +127,35 @@ func TestCreateRoleSurfacesAVerbFailure(t *testing.T) {
 	err := store.CreateRole(context.Background(), meta.Role{Name: "publisher", Verbs: []string{"repo:write"}})
 	if err == nil {
 		t.Error("CreateRole returned no error with role_verbs dropped")
+	}
+}
+
+// asConflict only translates the one SQLSTATE that means "you lost a race".
+// Anything else has to reach the caller unchanged: swallowing an unrelated
+// failure as a conflict would tell an operator the wrong thing, and the
+// contract's other error cases would stop being distinguishable.
+func TestOnlyUniqueViolationsBecomeConflicts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unique violation", &pgconn.PgError{Code: uniqueViolation}, true},
+		{"wrapped unique violation", fmt.Errorf("insert: %w", &pgconn.PgError{Code: uniqueViolation}), true},
+		{"foreign key violation", &pgconn.PgError{Code: "23503"}, false},
+		{"undefined table", &pgconn.PgError{Code: "42P01"}, false},
+		{"not a postgres error", errors.New("connection reset"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := asConflict(tt.err, "repository", "example")
+			if errors.Is(got, meta.ErrConflict) != tt.want {
+				t.Errorf("asConflict(%v) = %v, want ErrConflict: %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

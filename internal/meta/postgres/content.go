@@ -1,4 +1,4 @@
-package sqlite
+package postgres
 
 import (
 	"context"
@@ -55,7 +55,7 @@ func (s *Store) PutManifest(ctx context.Context, m meta.Manifest, refs []meta.Ma
 			return err
 		}
 		if _, err := sqlutil.Execute(ctx, tx,
-			`INSERT INTO manifests (`+manifestColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO manifests (`+manifestColumns+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			 ON CONFLICT (repo_name, digest) DO UPDATE SET
 			     media_type = excluded.media_type,
 			     artifact_type = excluded.artifact_type,
@@ -71,14 +71,14 @@ func (s *Store) PutManifest(ctx context.Context, m meta.Manifest, refs []meta.Ma
 		// The edge set is replaced wholesale: a re-push with fewer layers must
 		// not leave the old ones marked reachable.
 		if _, err := sqlutil.Execute(ctx, tx,
-			`DELETE FROM manifest_refs WHERE repo_name = ? AND manifest_digest = ?`,
+			`DELETE FROM manifest_refs WHERE repo_name = $1 AND manifest_digest = $2`,
 			m.Repository, string(m.Digest)); err != nil {
 			return err
 		}
 		for i, r := range refs {
 			if _, err := sqlutil.Execute(ctx, tx,
 				`INSERT INTO manifest_refs (repo_name, manifest_digest, ordinal, child_digest, kind)
-				 VALUES (?, ?, ?, ?, ?)`,
+				 VALUES ($1, $2, $3, $4, $5)`,
 				m.Repository, string(m.Digest), i, string(r.Child), string(r.Kind)); err != nil {
 				return err
 			}
@@ -97,7 +97,7 @@ func (s *Store) GetManifest(ctx context.Context, repo string, digest meta.Digest
 
 func (s *Store) manifest(ctx context.Context, q sqlutil.Querier, repo string, digest meta.Digest) (meta.Manifest, error) {
 	m, err := scanManifest(q.QueryRowContext(ctx,
-		`SELECT `+manifestColumns+` FROM manifests WHERE repo_name = ? AND digest = ?`,
+		`SELECT `+manifestColumns+` FROM manifests WHERE repo_name = $1 AND digest = $2`,
 		repo, string(digest)))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -124,7 +124,7 @@ func (s *Store) DeleteManifest(ctx context.Context, repo string, digest meta.Dig
 
 		parents, err := sqlutil.Collect(ctx, tx,
 			`SELECT DISTINCT manifest_digest FROM manifest_refs
-			 WHERE repo_name = ? AND child_digest = ? AND kind = ? AND manifest_digest <> ?
+			 WHERE repo_name = $1 AND child_digest = $2 AND kind = $3 AND manifest_digest <> $4
 			 ORDER BY manifest_digest`,
 			[]any{repo, string(digest), string(meta.RefChild), string(digest)},
 			func(rows *sql.Rows) (string, error) {
@@ -138,7 +138,7 @@ func (s *Store) DeleteManifest(ctx context.Context, repo string, digest meta.Dig
 			return meta.Referenced("manifest", string(digest), parents)
 		}
 
-		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM manifests WHERE repo_name = ? AND digest = ?`,
+		_, err = sqlutil.Execute(ctx, tx, `DELETE FROM manifests WHERE repo_name = $1 AND digest = $2`,
 			repo, string(digest))
 		return err
 	})
@@ -155,7 +155,7 @@ func (s *Store) ListManifestRefs(ctx context.Context, repo string, digest meta.D
 
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT child_digest, kind FROM manifest_refs
-		 WHERE repo_name = ? AND manifest_digest = ? ORDER BY ordinal`,
+		 WHERE repo_name = $1 AND manifest_digest = $2 ORDER BY ordinal`,
 		[]any{repo, string(digest)},
 		func(rows *sql.Rows) (meta.ManifestRef, error) {
 			var (
@@ -181,7 +181,7 @@ func (s *Store) ListIndexParents(ctx context.Context, repo string, child meta.Di
 
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT DISTINCT manifest_digest FROM manifest_refs
-		 WHERE repo_name = ? AND child_digest = ? AND kind = ? ORDER BY manifest_digest`,
+		 WHERE repo_name = $1 AND child_digest = $2 AND kind = $3 ORDER BY manifest_digest`,
 		[]any{repo, string(child), string(meta.RefChild)},
 		func(rows *sql.Rows) (meta.Digest, error) {
 			var parent string
@@ -202,7 +202,7 @@ func (s *Store) ListReferrers(ctx context.Context, repo string, subject meta.Dig
 
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT `+manifestColumns+` FROM manifests
-		 WHERE repo_name = ? AND subject_digest = ? AND (? = '' OR artifact_type = ?)
+		 WHERE repo_name = $1 AND subject_digest = $2 AND ($3 = '' OR artifact_type = $4)
 		 ORDER BY digest`,
 		[]any{repo, string(subject), artifactType, artifactType},
 		func(rows *sql.Rows) (meta.Manifest, error) { return scanManifest(rows) })
@@ -228,7 +228,7 @@ func (s *Store) PutTag(ctx context.Context, tag meta.Tag) error {
 		// tag, pointing somewhere new.
 		_, err := sqlutil.Execute(ctx, tx,
 			`INSERT INTO tags (repo_name, name, manifest_digest, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?)
+			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (repo_name, name) DO UPDATE SET
 			     manifest_digest = excluded.manifest_digest,
 			     updated_at = excluded.updated_at`,
@@ -245,7 +245,7 @@ func (s *Store) GetTag(ctx context.Context, repo, name string) (meta.Tag, error)
 
 	tag, err := scanTag(s.db.QueryRowContext(ctx,
 		`SELECT repo_name, name, manifest_digest, created_at, updated_at
-		 FROM tags WHERE repo_name = ? AND name = ?`, repo, name))
+		 FROM tags WHERE repo_name = $1 AND name = $2`, repo, name))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.Tag{}, meta.NotFound("tag", name)
@@ -288,7 +288,7 @@ func (s *Store) ListTags(ctx context.Context, repo string, opts meta.ListOptions
 	limit := opts.EffectiveLimit()
 	tags, err := sqlutil.Collect(ctx, s.db,
 		`SELECT repo_name, name, manifest_digest, created_at, updated_at
-		 FROM tags WHERE repo_name = ? AND name > ? ORDER BY name LIMIT ?`,
+		 FROM tags WHERE repo_name = $1 AND name > $2 ORDER BY name LIMIT $3`,
 		[]any{repo, opts.Cursor, limit + 1},
 		func(rows *sql.Rows) (meta.Tag, error) { return scanTag(rows) })
 	if err != nil {
@@ -309,7 +309,7 @@ func (s *Store) DeleteTag(ctx context.Context, repo, name string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM tags WHERE repo_name = ? AND name = ?`, repo, name)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM tags WHERE repo_name = $1 AND name = $2`, repo, name)
 	if err != nil {
 		return err
 	}
@@ -333,7 +333,7 @@ func (s *Store) PutBlob(ctx context.Context, blob meta.Blob) error {
 	}
 
 	_, err := sqlutil.Execute(ctx, s.db,
-		`INSERT INTO blobs (digest, size, created_at) VALUES (?, ?, ?)
+		`INSERT INTO blobs (digest, size, created_at) VALUES ($1, $2, $3)
 		 ON CONFLICT (digest) DO NOTHING`,
 		string(blob.Digest), blob.Size, sqlutil.Millis(blob.CreatedAt))
 	return err
@@ -351,7 +351,7 @@ func (s *Store) GetBlob(ctx context.Context, digest meta.Digest) (meta.Blob, err
 		created sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT digest, size, created_at FROM blobs WHERE digest = ?`, string(digest)).
+		`SELECT digest, size, created_at FROM blobs WHERE digest = $1`, string(digest)).
 		Scan(&stored, &blob.Size, &created)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -371,7 +371,7 @@ func (s *Store) DeleteBlob(ctx context.Context, digest meta.Digest) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM blobs WHERE digest = ?`, string(digest))
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM blobs WHERE digest = $1`, string(digest))
 	if err != nil {
 		return err
 	}
@@ -395,7 +395,7 @@ func (s *Store) CreateUpload(ctx context.Context, session meta.UploadSession) er
 		if _, err := s.repository(ctx, tx, session.Repository); err != nil {
 			return err
 		}
-		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM upload_sessions WHERE id = ?`, session.ID)
+		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM upload_sessions WHERE id = $1`, session.ID)
 		if err != nil {
 			return err
 		}
@@ -404,10 +404,10 @@ func (s *Store) CreateUpload(ctx context.Context, session meta.UploadSession) er
 		}
 		_, err = sqlutil.Execute(ctx, tx,
 			`INSERT INTO upload_sessions (id, repo_name, digest, bytes, started_at, last_chunk_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
 			session.ID, session.Repository, string(session.Digest), session.Bytes,
 			sqlutil.Millis(session.StartedAt), sqlutil.Millis(session.LastChunkAt))
-		return err
+		return asConflict(err, "upload", session.ID)
 	})
 }
 
@@ -419,7 +419,7 @@ func (s *Store) GetUpload(ctx context.Context, id string) (meta.UploadSession, e
 
 	session, err := scanUpload(s.db.QueryRowContext(ctx,
 		`SELECT id, repo_name, digest, bytes, started_at, last_chunk_at
-		 FROM upload_sessions WHERE id = ?`, id))
+		 FROM upload_sessions WHERE id = $1`, id))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return meta.UploadSession{}, meta.NotFound("upload", id)
@@ -458,7 +458,7 @@ func (s *Store) UpdateUpload(ctx context.Context, id string, bytes int64, at tim
 	}
 
 	affected, err := sqlutil.Execute(ctx, s.db,
-		`UPDATE upload_sessions SET bytes = ?, last_chunk_at = ? WHERE id = ?`,
+		`UPDATE upload_sessions SET bytes = $1, last_chunk_at = $2 WHERE id = $3`,
 		bytes, sqlutil.Millis(at), id)
 	if err != nil {
 		return err
@@ -475,7 +475,7 @@ func (s *Store) DeleteUpload(ctx context.Context, id string) error {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM upload_sessions WHERE id = ?`, id)
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM upload_sessions WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -493,16 +493,19 @@ func (s *Store) ListStaleUploads(ctx context.Context, before time.Time, limit in
 	}
 
 	// A session with no recorded activity is as stale as one can be, so a NULL
-	// timestamp is included rather than swallowed by the comparison.
-	rowLimit := -1
+	// timestamp is included rather than swallowed by the comparison. NULLs sort
+	// first in ascending order here, which is where the oldest belong.
+	//
+	// Postgres reads a NULL limit as "no limit"; it rejects a negative one.
+	rowLimit := sql.NullInt64{}
 	if limit > 0 {
-		rowLimit = limit
+		rowLimit = sql.NullInt64{Int64: int64(limit), Valid: true}
 	}
 	return sqlutil.Collect(ctx, s.db,
 		`SELECT id, repo_name, digest, bytes, started_at, last_chunk_at
 		 FROM upload_sessions
-		 WHERE last_chunk_at IS NULL OR last_chunk_at < ?
-		 ORDER BY last_chunk_at, id LIMIT ?`,
+		 WHERE last_chunk_at IS NULL OR last_chunk_at < $1
+		 ORDER BY last_chunk_at NULLS FIRST, id LIMIT $2`,
 		[]any{before.UTC().UnixMilli(), rowLimit},
 		func(rows *sql.Rows) (meta.UploadSession, error) { return scanUpload(rows) })
 }
