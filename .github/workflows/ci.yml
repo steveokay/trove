@@ -36,6 +36,12 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          # Build the linter with this repository's toolchain rather than
+          # downloading the release binary. The published v1.64.8 binary is
+          # built with Go 1.24 and refuses any module targeting a newer
+          # language version, so a go.mod bump would otherwise break linting
+          # with no way to pin around it inside the v1 series.
+          install-mode: goinstall
           # Schema verification fetches a JSON schema from golangci-lint.run on
           # every run, which makes linting depend on a third-party site being
           # up: it has already failed CI once on a timeout. The config is
