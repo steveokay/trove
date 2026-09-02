@@ -112,7 +112,10 @@ adversarial test (Z-019):
 
 ## Consequences
 
-- 33 verbs total. The vocabulary enumeration test (§9) iterates this exact list.
+- 30 verbs total. The vocabulary enumeration test (§9) iterates this exact list.
+  (Corrected from 33 on 2026-09-02 while implementing Z-005: the tables above
+  hold 30 entries and are authoritative; the earlier figure was an arithmetic
+  slip in this line alone. `internal/authz.AllVerbs` is the executable copy.)
 - `repo:create`/`repo:configure` are new relative to CLAUDE.md §5's minimum set,
   closing the gap C-016 exposed (repository CRUD had no verb). CLAUDE.md §5 remains
   the summary; this ADR is authoritative.

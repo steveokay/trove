@@ -31,7 +31,7 @@ precede it — that is ordering, not a blocker.
 | D-015 | ADR: pull gating design | done | Q12 ✓, Q24 ✓ | `docs/adr/0013-pull-gating.md` — single enforcement door, bypass closure, fail-closed lookups, audited break-glass |
 | D-016 | ADR: quota accounting model | done | Q8 ✓ | `docs/adr/0014-quota-model.md` — attribution vs physical accounting, hysteresis soft-warn, 413+DENIED, cache evicts |
 | D-017 | **ADR: RBAC model** | done | Q14 ✓, Q19 ✓, Q20 ✓ | `docs/adr/0001-rbac-model.md` — subjects, groups, roles, bindings, scope grammar, built-in roles |
-| D-018 | **ADR: permission vocabulary** | done | D-017 | `docs/adr/0002-permission-vocabulary.md` — 33 verbs incl. `repo:create`/`repo:configure`, splits justified, verb → operation mapping |
+| D-018 | **ADR: permission vocabulary** | done | D-017 | `docs/adr/0002-permission-vocabulary.md` — 30 verbs incl. `repo:create`/`repo:configure`, splits justified, verb → operation mapping (count corrected from 33 in Z-005: the ADR's tables always held 30) |
 | D-019 | **ADR: visibility & disclosure policy** | done | Q18 ✓ | `docs/adr/0003-visibility-disclosure.md` — status-code matrix, ten enumerated filtered surfaces |
 | D-020 | ADR: admin API + CLI conventions | done | Q23 ✓ | `docs/adr/0015-admin-api-cli.md` — /api/v1, problem+json, cursor pagination, spec-vs-route CI check, offline exceptions |
 | D-021 | ADR: secrets key management | done | Q21 ✓ | `docs/adr/0016-secrets-key-management.md` — keyfile + key-id format, AAD context binding, two-step rotation, redaction rules |
@@ -66,6 +66,10 @@ Detailed specs (files, test plans): `docs/plan/phase-1-foundations.md`
 Built before the registry handlers, not after. Retrofitting permission filtering into
 existing queries is how disclosure bugs get shipped.
 
+Phase 1 closed 2026-09-02 (F-001…F-010): config, logging and shutdown, `meta.Store`
+with SQLite and Postgres, and `blob.Store` with filesystem and S3 drivers, each
+interface with a contract suite every implementation runs unmodified.
+
 Detailed specs (files, test plans): `docs/plan/phase-2-identity-rbac.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
@@ -74,7 +78,7 @@ Detailed specs (files, test plans): `docs/plan/phase-2-identity-rbac.md`
 | Z-002 | Users + Argon2id credentials | todo | D-003 | Timing-safe compare; rate-limited auth endpoints |
 | Z-003 | Robot accounts: mandatory expiry, revocation | todo | D-003 | Revoked token rejected on next use, not on next mint; tokens stored hashed at rest |
 | Z-004 | OCI token flow (`WWW-Authenticate` / bearer) | todo | D-003 | `docker login` works end to end; scopes derived from bindings |
-| Z-005 | **Permission vocabulary as typed constants** | todo | D-018 | Exhaustive; test fails if a verb has no positive and negative test |
+| Z-005 | **Permission vocabulary as typed constants** | review | D-018 ✓ | `internal/authz`: the 30 ADR 0002 verbs as typed constants with `AllVerbs`/`ParseVerb(s)`, closed set (every unknown verb reported at once). `internal/authz/verbtest` implements the §9 enumeration mechanism: tests mark what they exercise with `verbtest.Positive/Negative`, and the check reads those marks back out of the repository's test sources — a registry could not work, since each package's tests are a separate process. The allowlist of unwired verbs is a ratchet: a verb that gains tests fails until its entry is removed, so it can only shrink. All 30 are allowlisted today, each naming the task that will wire it. Mechanism unit-tested against fixture repositories |
 | Z-006 | **Role model + built-in roles** | todo | D-017 | Built-ins non-deletable; custom roles use the same vocabulary |
 | Z-007 | **Binding model + repository pattern matching** | todo | D-017, Q20 | Pattern grammar fuzz-tested; traversal and overlap cases covered |
 | Z-008 | **`authz.Decide` pure decision function** | todo | D-017 | No I/O; property-tested; additive union semantics |
