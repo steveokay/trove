@@ -17,6 +17,7 @@ import (
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/sqlutil"
+	"github.com/steveokay/trove/internal/server"
 
 	_ "modernc.org/sqlite"
 )
@@ -244,19 +245,14 @@ func selectVisible(t *testing.T, db *sql.DB, scope authz.Scope) []string {
 	return out
 }
 
-// visibilityFor is the bridge the query layer will use (Z-012): an authz
-// filter is the same three fields the storage layer filters by, so the
-// translation is total and mechanical.
+// visibilityFor runs a single scope through the production bridge
+// (server.VisibilityFor, Z-012), so the differential tests pin the code the
+// query layer actually filters with rather than a test-local copy of it.
 func visibilityFor(scope authz.Scope) meta.Visibility {
-	filter, ok := scope.Filter()
-	if !ok {
-		return meta.VisibleTo()
-	}
-	return meta.VisibleTo(meta.ScopeFilter{
-		All:    filter.All,
-		Exact:  filter.Exact,
-		Prefix: filter.Prefix,
-	})
+	bindings := []authz.Binding{{
+		ID: "b", Role: "lister", Scope: scope, Verbs: []authz.Verb{authz.RepoList},
+	}}
+	return server.VisibilityFor(bindings, authz.RepoList)
 }
 
 // The storage layer has its own matcher for the same filter, used wherever a

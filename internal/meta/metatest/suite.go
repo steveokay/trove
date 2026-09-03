@@ -39,6 +39,8 @@ func Run(t *testing.T, f Factory) {
 		{"RepositoryConfigIsCopied", testRepositoryConfigIsCopied},
 		{"ListRepositoriesFiltersByVisibility", testListRepositoriesFiltersByVisibility},
 		{"ListRepositoriesPaginates", testListRepositoriesPaginates},
+		{"ListRepositoriesPaginatesUnderFiltering", testListRepositoriesPaginatesUnderFiltering},
+		{"ListRepositoriesCursorIsStableUnderWrites", testListRepositoriesCursorIsStableUnderWrites},
 		{"ListRepositoriesPageLimits", testListRepositoriesPageLimits},
 		{"GroupMembership", testGroupMembership},
 		{"GroupMembershipRules", testGroupMembershipRules},
@@ -360,6 +362,108 @@ func testListRepositoriesPaginates(t *testing.T, s meta.Store) {
 		if seen[i] <= seen[i-1] {
 			t.Fatalf("pages are not strictly ordered, or repeat: %v", seen)
 		}
+	}
+}
+
+func testListRepositoriesPaginatesUnderFiltering(t *testing.T, s meta.Store) {
+	// Hidden repositories interleave with visible ones in name order, so page
+	// boundaries fall beside rows the filter removes. A store that fetched a
+	// page and filtered afterwards would show up here as a short page, a
+	// duplicate, or a cursor naming a repository the subject cannot see -- the
+	// count-and-pagination leak ADR 0003 forbids (Z-012).
+	visible := []string{"team-a/api", "team-a/web", "team-c/api", "team-c/cli", "team-c/web", "zz-solo"}
+	hidden := []string{"aaa-first", "team-a", "team-ab/api", "team-b/api", "team-b/web", "zz-solo-2", "zzz-last"}
+	for _, name := range append(append([]string{}, visible...), hidden...) {
+		mustCreateRepo(t, s, name, meta.Hosted)
+	}
+	vis := meta.VisibleTo(
+		meta.ScopeFilter{Prefix: "team-a/"},
+		meta.ScopeFilter{Prefix: "team-c/"},
+		meta.ScopeFilter{Exact: "zz-solo"},
+	)
+
+	var seen []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > len(visible) {
+			t.Fatal("pagination did not terminate")
+		}
+		page, err := s.ListRepositories(ctx(), meta.ListOptions{Visibility: vis, Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListRepositories: %v", err)
+		}
+		if len(page.Repositories) > 2 {
+			t.Fatalf("page of %d repositories, want at most the limit of 2", len(page.Repositories))
+		}
+		for _, r := range page.Repositories {
+			seen = append(seen, r.Name)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		// The cursor is part of the response. One naming a hidden repository
+		// would disclose it as surely as listing it.
+		if !vis.Allows(page.NextCursor) {
+			t.Fatalf("NextCursor %q names a repository the subject cannot see", page.NextCursor)
+		}
+		cursor = page.NextCursor
+	}
+
+	if fmt.Sprint(seen) != fmt.Sprint(visible) {
+		t.Fatalf("stitched pages = %v, want exactly the visible set %v", seen, visible)
+	}
+}
+
+func testListRepositoriesCursorIsStableUnderWrites(t *testing.T, s meta.Store) {
+	// Cursors are keyset, not offset (ADR 0015): rows created behind the
+	// cursor are not revisited and rows created ahead of it appear, but a page
+	// walk never repeats or skips what already existed. The visibility names
+	// repositories that do not exist yet, which is fine -- a binding's scope
+	// is independent of what has been created under it.
+	vis := meta.VisibleTo(
+		meta.ScopeFilter{Exact: "r-00"}, meta.ScopeFilter{Exact: "r-01"},
+		meta.ScopeFilter{Exact: "r-03"}, meta.ScopeFilter{Exact: "r-05"},
+		meta.ScopeFilter{Exact: "r-07"},
+	)
+	for i := 1; i <= 6; i++ {
+		mustCreateRepo(t, s, fmt.Sprintf("r-%02d", i), meta.Hosted)
+	}
+
+	first, err := s.ListRepositories(ctx(), meta.ListOptions{Visibility: vis, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if len(first.Repositories) != 1 || first.Repositories[0].Name != "r-01" || first.NextCursor != "r-01" {
+		t.Fatalf("first page = %+v, want [r-01] with cursor r-01", first)
+	}
+
+	// Writes land mid-walk: a visible repository behind the cursor, a hidden
+	// one between the remaining pages, and a visible one past the end.
+	mustCreateRepo(t, s, "r-00", meta.Hosted)
+	mustCreateRepo(t, s, "r-04x", meta.Hosted)
+	mustCreateRepo(t, s, "r-07", meta.Hosted)
+
+	seen := []string{first.Repositories[0].Name}
+	cursor := first.NextCursor
+	for pages := 0; cursor != ""; pages++ {
+		if pages > 8 {
+			t.Fatal("pagination did not terminate")
+		}
+		page, err := s.ListRepositories(ctx(), meta.ListOptions{Visibility: vis, Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListRepositories: %v", err)
+		}
+		for _, r := range page.Repositories {
+			seen = append(seen, r.Name)
+		}
+		cursor = page.NextCursor
+	}
+
+	// r-00 was created behind the cursor, so this walk legitimately misses
+	// it; r-04x is not visible; r-07 was created ahead and appears.
+	want := []string{"r-01", "r-03", "r-05", "r-07"}
+	if fmt.Sprint(seen) != fmt.Sprint(want) {
+		t.Fatalf("stitched pages = %v, want %v: no repeats, no skips of what existed, nothing hidden", seen, want)
 	}
 }
 

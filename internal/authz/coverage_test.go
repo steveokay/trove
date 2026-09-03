@@ -20,7 +20,9 @@ import (
 //
 // Z-010 took the first three off it -- repo:read, repo:write and gc:run are
 // exercised both ways by the handler matrix, which is where a verb is really
-// enforced. The rest come off as their handlers land.
+// enforced. Z-012 took repo:list off: a listing enforces it in the query
+// rather than at a handler, so its tests ride the visibility pipeline in
+// internal/server. The rest come off as their handlers land.
 func TestEveryVerbHasBothPolarities(t *testing.T) {
 	t.Parallel()
 
@@ -31,7 +33,6 @@ func TestEveryVerbHasBothPolarities(t *testing.T) {
 // will wire it up. Entries are removed as those tasks land; adding one back
 // requires deleting tests, which is the point.
 var pendingVerbs = map[authz.Verb]string{
-	authz.RepoList:          "Z-012 permission-filtered listings",
 	authz.TagDelete:         "R-003 tag handlers",
 	authz.ManifestDelete:    "R-002 manifest handlers",
 	authz.ReferrerRead:      "R-005 referrers API",
