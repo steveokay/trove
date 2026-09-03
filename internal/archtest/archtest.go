@@ -485,6 +485,16 @@ func Rules() []Rule {
 			Mode: Direct,
 		},
 		{
+			Name:   "jwt-is-quarantined",
+			Reason: "ADR 0004 / Z-004: internal/authn/token is the only importer of the JWT library. The algorithm allowlist that stops an alg-confusion forgery lives there once; a second caller of the library is a second chance to parse a token without it.",
+			From:   []string{modulePath + "/..."},
+			Except: []string{pkg("internal/authn/token") + "/..."},
+			Forbidden: []string{
+				"github.com/golang-jwt/jwt/...",
+			},
+			Mode: Direct,
+		},
+		{
 			Name:   "password-hashing-is-quarantined",
 			Reason: "ADR 0004 / Z-002: internal/authn owns password hashing. A second caller of the primitive is a second set of cost parameters and a second encoding, and the one that drifts is the one nobody is looking at.",
 			From:   []string{modulePath + "/..."},

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"time"
 
 	"github.com/steveokay/trove/internal/authn"
+	"github.com/steveokay/trove/internal/authn/token"
 	"github.com/steveokay/trove/internal/config"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/postgres"
@@ -69,7 +71,16 @@ func runServe(ctx context.Context, env Env, args []string) error {
 	}
 	robots := authn.NewRobotSecrets(store, ring, limiter, nil)
 
-	srv := server.New(cfg, log, buildRouter(store, login, robots, log))
+	signingKey, err := token.LoadOrCreateKey(cfg.Auth.TokenSigningKeyFile)
+	if err != nil {
+		return fmt.Errorf("open token signing key: %w", err)
+	}
+	signer, err := token.NewSigner(signingKey, time.Duration(cfg.Auth.TokenTTL), nil, nil)
+	if err != nil {
+		return fmt.Errorf("build the token signer: %w", err)
+	}
+
+	srv := server.New(cfg, log, buildRouter(store, login, robots, signer, cfg.Server.ExternalURL, log))
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -77,19 +88,33 @@ func runServe(ctx context.Context, env Env, args []string) error {
 }
 
 // buildRouter assembles the served route table: one guard in front of every
-// route, basic auth as the bootstrap-era credential path (ADR 0004), and the
-// must-rotate gate armed. A test walks the result, so what serve actually
-// serves is pinned rather than assumed.
-func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.RobotSecrets, log *slog.Logger) *server.Router {
+// route, bearer tokens layered over basic auth as the one credential path
+// (ADR 0004), the must-rotate gate armed, and the OCI token flow's two
+// endpoints. A test walks the result, so what serve actually serves is pinned
+// rather than assumed.
+func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.RobotSecrets,
+	signer *token.Signer, externalURL string, log *slog.Logger,
+) *server.Router {
+	challenge := server.TokenChallenge(externalURL)
+	credentials := server.Bearer(signer, server.BasicAuth(login, robots))
+
 	router := server.NewRouter(&server.Guard{
 		Subjects:    store,
 		Bindings:    store,
 		Rotation:    store,
-		Credentials: server.BasicAuth(login, robots),
+		Credentials: credentials,
+		Challenge:   challenge,
 		Log:         log,
 	})
 	(&server.AuthExplain{Subjects: store, Bindings: store, Log: log}).Register(router)
 	(&server.AuthPassword{Login: login, Store: store, Hasher: authn.NewHasher(), Log: log}).Register(router)
+	(&server.TokenEndpoint{
+		Credentials: credentials, Subjects: store, Bindings: store,
+		Signer: signer, Challenge: challenge, Log: log,
+	}).Register(router)
+	(&server.V2Root{
+		Credentials: credentials, Subjects: store, Challenge: challenge, Log: log,
+	}).Register(router)
 	return router
 }
 

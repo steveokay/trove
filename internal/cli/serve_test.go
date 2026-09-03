@@ -13,7 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"crypto/ed25519"
+	"fmt"
+
 	"github.com/steveokay/trove/internal/authn"
+	"github.com/steveokay/trove/internal/authn/token"
 	"github.com/steveokay/trove/internal/meta/memory"
 )
 
@@ -208,6 +212,25 @@ func TestServeRefusesACorruptKeyfile(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "secrets keyfile") {
 		t.Fatalf("Run = %v, want a refusal naming the keyfile", err)
 	}
+
+	// The token signing key follows the same rule: regenerating it silently
+	// would refuse every outstanding token while hiding that something
+	// rewrote the file.
+	t.Run("token signing key", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o700); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "keys", "token-signing.key"), []byte("junk\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		env, _ := newServeEnv()
+		err := Run(context.Background(), env, []string{"serve", "-data-dir", dir, "-server.address", "127.0.0.1:0"})
+		if err == nil || !strings.Contains(err.Error(), "token signing key") {
+			t.Fatalf("Run = %v, want a refusal naming the signing key", err)
+		}
+	})
 }
 
 // The assembled table is a security artifact: every route guarded, none
@@ -224,22 +247,121 @@ func TestAssembledRouteTable(t *testing.T) {
 		t.Fatalf("NewPasswordLogin: %v", err)
 	}
 
-	router := buildRouter(store, login, nil, nil)
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	signer, err := token.NewSigner(key, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	router := buildRouter(store, login, nil, signer, "", nil)
 	if err := router.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
-	var exempt []string
+	var public, exempt []string
 	for _, route := range router.Routes() {
 		if route.Public() {
-			t.Errorf("%s %s is public; serve registers no public routes yet", route.Method, route.Pattern)
+			public = append(public, route.Method+" "+route.Pattern)
 		}
 		if route.Permission.RotationExempt {
 			exempt = append(exempt, route.Method+" "+route.Pattern)
 		}
 	}
+	// The two public routes are the token flow's own (ADR 0004): the
+	// endpoint that issues credentials and the probe that asks for them.
+	wantPublic := []string{"GET /token", "GET /v2/{$}"}
+	if fmt.Sprint(public) != fmt.Sprint(wantPublic) {
+		t.Errorf("public routes = %v, want exactly %v", public, wantPublic)
+	}
 	if len(exempt) != 1 || exempt[0] != "POST /api/v1/auth/password" {
 		t.Errorf("rotation-exempt routes = %v, want exactly the rotation endpoint", exempt)
+	}
+}
+
+// The docker login sequence against the real serve stack over real HTTP.
+func TestServeSpeaksTheDockerTokenFlow(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	env, stdout, logs := newServeStreams()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, env, []string{
+			"serve", "-data-dir", dir, "-server.address", "127.0.0.1:0", "-log.format", "json",
+		})
+	}()
+	waitForServing(t, logs, done)
+
+	password := regexp.MustCompile(`password: ([A-Za-z0-9_-]{32})`).FindStringSubmatch(stdout.String())
+	if password == nil {
+		t.Fatalf("no bootstrap password:\n%s", stdout.String())
+	}
+	address := servingAddress(t, logs)
+	base := "http://" + address
+
+	// Probe: 401, and the challenge names this very server's token endpoint.
+	probe, err := http.Get(base + "/v2/")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	_ = probe.Body.Close()
+	if probe.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("probe: %d, want 401", probe.StatusCode)
+	}
+	challenge := probe.Header.Get("WWW-Authenticate")
+	if !strings.Contains(challenge, "http://"+address+"/token") {
+		t.Fatalf("challenge %q does not name this server's token endpoint", challenge)
+	}
+
+	// Exchange the bootstrap credentials for a token.
+	req, err := http.NewRequest(http.MethodGet, base+"/token?service=trove", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.SetBasicAuth("admin", password[1])
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	var minted struct {
+		Token string `json:"token"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&minted)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || minted.Token == "" {
+		t.Fatalf("token: %d, decode %v", resp.StatusCode, err)
+	}
+
+	// The bearer opens the probe: this is the moment docker login reports
+	// success.
+	again, err := http.NewRequest(http.MethodGet, base+"/v2/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	again.Header.Set("Authorization", "Bearer "+minted.Token)
+	final, err := http.DefaultClient.Do(again)
+	if err != nil {
+		t.Fatalf("authenticated probe: %v", err)
+	}
+	_ = final.Body.Close()
+	if final.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated probe: %d, want 200", final.StatusCode)
+	}
+
+	// The signing key was created beside the secrets key.
+	if _, err := os.Stat(filepath.Join(dir, "keys", "token-signing.key")); err != nil {
+		t.Errorf("token signing key after boot: %v", err)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve returned %v", err)
 	}
 }
 

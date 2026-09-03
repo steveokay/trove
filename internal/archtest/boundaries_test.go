@@ -520,6 +520,7 @@ func TestRulesAreWellFormed(t *testing.T) {
 		"trivy-is-quarantined",
 		"aead-primitives-are-quarantined",
 		"password-hashing-is-quarantined",
+		"jwt-is-quarantined",
 	} {
 		if !seen[name] {
 			t.Errorf("rule %q is missing from Rules()", name)
@@ -549,6 +550,7 @@ func TestRulesCatchTheirOwnViolations(t *testing.T) {
 		{rule: "trivy-is-quarantined", from: pkg("internal/scan"), to: "github.com/aquasecurity/trivy/pkg/fanal", wantHops: 2},
 		{rule: "aead-primitives-are-quarantined", from: pkg("internal/authn"), to: "crypto/cipher", wantHops: 2},
 		{rule: "password-hashing-is-quarantined", from: pkg("internal/server"), to: "golang.org/x/crypto/argon2", wantHops: 2},
+		{rule: "jwt-is-quarantined", from: pkg("internal/server"), to: "github.com/golang-jwt/jwt/v5", wantHops: 2},
 	}
 
 	rulesByName := make(map[string]Rule)
@@ -601,6 +603,7 @@ func TestQuarantineExemptionsAreHonoured(t *testing.T) {
 		{rule: "trivy-is-quarantined", exempt: pkg("internal/scan/trivy"), imp: "github.com/aquasecurity/trivy/pkg/fanal"},
 		{rule: "aead-primitives-are-quarantined", exempt: pkg("internal/secretbox"), imp: "crypto/cipher"},
 		{rule: "password-hashing-is-quarantined", exempt: pkg("internal/authn"), imp: "golang.org/x/crypto/argon2"},
+		{rule: "jwt-is-quarantined", exempt: pkg("internal/authn/token"), imp: "github.com/golang-jwt/jwt/v5"},
 	}
 
 	rulesByName := make(map[string]Rule)

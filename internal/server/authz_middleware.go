@@ -75,9 +75,12 @@ type Guard struct {
 	Bindings BindingStore
 	// Credentials says who the request claims to be. Nil means NoCredentials.
 	Credentials CredentialFunc
-	// Challenge is the WWW-Authenticate value sent with a 401. `docker login`
-	// depends on it, so it is never omitted (ADR 0003).
-	Challenge string
+	// Challenge produces the WWW-Authenticate value sent with a 401.
+	// `docker login` depends on it, so it is never omitted (ADR 0003). It is
+	// a function of the request because the realm is an absolute URL: with no
+	// external_url configured it is derived from the Host the client used
+	// (Z-004). Nil means DefaultChallenge.
+	Challenge func(*http.Request) string
 	// Errors renders refusals. Nil means ProblemErrors, the admin API's shape;
 	// the OCI routes supply their own spec-shaped renderer (R-008).
 	Errors ErrorRenderer
@@ -260,7 +263,7 @@ func (g *Guard) refuseUnauthenticated(w http.ResponseWriter, r *http.Request, er
 		// Wrong password and unknown user arrive here as the same error on
 		// purpose; the client gets the challenge and may try again.
 		Logger(ctx, g.Log).Info("authentication failed", "error", err)
-		g.errors().Unauthorized(w, r, g.challenge())
+		g.errors().Unauthorized(w, r, g.challenge(r))
 	case errors.Is(err, authn.ErrNoAnonymousSubject):
 		// The deployment is broken, not the request: without that row there is
 		// no subject for an unauthenticated request to be.
@@ -270,7 +273,7 @@ func (g *Guard) refuseUnauthenticated(w http.ResponseWriter, r *http.Request, er
 		// Presented credentials that are no longer good. The client may have
 		// others, so it gets the challenge rather than a refusal.
 		Logger(ctx, g.Log).Info("authentication failed", "error", err)
-		g.errors().Unauthorized(w, r, g.challenge())
+		g.errors().Unauthorized(w, r, g.challenge(r))
 	default:
 		Logger(ctx, g.Log).Error("could not resolve the request's subject", "error", err)
 		g.errors().Internal(w, r)
@@ -294,7 +297,7 @@ func (g *Guard) refuse(w http.ResponseWriter, r *http.Request, subject authn.Sub
 	case subject.IsAnonymous():
 		// Anonymous lacking access gets the challenge, not a 404: the client
 		// may be able to authenticate into visibility (ADR 0003).
-		g.errors().Unauthorized(w, r, g.challenge())
+		g.errors().Unauthorized(w, r, g.challenge(r))
 	case canRead(bindings, decision.Resource):
 		g.errors().Forbidden(w, r)
 	default:
@@ -317,11 +320,11 @@ func canRead(bindings []authz.Binding, resource authz.Resource) bool {
 		authz.Allows(bindings, authz.RepoList, resource)
 }
 
-func (g *Guard) challenge() string {
-	if g.Challenge == "" {
+func (g *Guard) challenge(r *http.Request) string {
+	if g.Challenge == nil {
 		return DefaultChallenge
 	}
-	return g.Challenge
+	return g.Challenge(r)
 }
 
 func (g *Guard) errors() ErrorRenderer {

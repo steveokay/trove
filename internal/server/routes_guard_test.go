@@ -177,7 +177,7 @@ func TestPublicRouteListIsReviewable(t *testing.T) {
 func TestPublicRouteListStaysSmall(t *testing.T) {
 	t.Parallel()
 
-	const approved = 5
+	const approved = 6
 	if got := len(server.PublicRoutes()); got != approved {
 		t.Errorf("%d public routes are approved, expected %d -- if the change is deliberate, "+
 			"update this count in the same commit so it is reviewed", got, approved)

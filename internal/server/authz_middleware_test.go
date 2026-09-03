@@ -80,7 +80,9 @@ func guardedServer(t *testing.T, store *memory.Store, credentials server.Credent
 		Subjects:    store,
 		Bindings:    store,
 		Credentials: credentials,
-		Challenge:   `Bearer realm="trove",service="registry"`,
+		Challenge: func(*http.Request) string {
+			return `Bearer realm="trove",service="registry"`
+		},
 	}
 	router := server.NewRouter(guard)
 
