@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -187,6 +189,27 @@ func TestServeFailsWhenDataDirIsAlreadyServed(t *testing.T) {
 	}
 }
 
+// An unreadable existing keyfile is fatal: with credential digests keyed by
+// it in the database, starting over with a fresh key would orphan them all
+// while looking like a successful boot (ADR 0016).
+func TestServeRefusesACorruptKeyfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "secrets.key"), []byte("not a key\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	env, _ := newServeEnv()
+	err := Run(context.Background(), env, []string{"serve", "-data-dir", dir, "-server.address", "127.0.0.1:0"})
+	if err == nil || !strings.Contains(err.Error(), "secrets keyfile") {
+		t.Fatalf("Run = %v, want a refusal naming the keyfile", err)
+	}
+}
+
 // The assembled table is a security artifact: every route guarded, none
 // public, and exactly one door through the rotation gate. Walking it here
 // means adding a route to serve without thinking about these properties fails
@@ -201,7 +224,7 @@ func TestAssembledRouteTable(t *testing.T) {
 		t.Fatalf("NewPasswordLogin: %v", err)
 	}
 
-	router := buildRouter(store, login, nil)
+	router := buildRouter(store, login, nil, nil)
 	if err := router.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -303,7 +326,16 @@ func TestServeBootstrapsAndForcesRotation(t *testing.T) {
 		t.Fatalf("serve returned %v", err)
 	}
 
-	// A restart prints no credentials: the store remembers its admin.
+	// The first boot also generated the secrets keyfile (Q21) and said so.
+	if _, err := os.Stat(filepath.Join(dir, "keys", "secrets.key")); err != nil {
+		t.Errorf("secrets keyfile after first boot: %v", err)
+	}
+	if !strings.Contains(logs.String(), "generated a new secrets keyfile") {
+		t.Error("first boot did not log the keyfile generation")
+	}
+
+	// A restart prints no credentials and generates no second key: the store
+	// remembers its admin and the keyfile is loaded, not replaced.
 	env2, stdout2, logs2 := newServeStreams()
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
@@ -316,6 +348,9 @@ func TestServeBootstrapsAndForcesRotation(t *testing.T) {
 	waitForServing(t, logs2, done2)
 	if strings.Contains(stdout2.String(), "password:") {
 		t.Fatalf("second boot printed credentials:\n%s", stdout2.String())
+	}
+	if strings.Contains(logs2.String(), "generated a new secrets keyfile") {
+		t.Fatal("second boot generated a fresh key over the existing one")
 	}
 	cancel2()
 	if err := <-done2; err != nil {

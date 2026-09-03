@@ -170,7 +170,7 @@ func TestBootstrapToRotatedEndToEnd(t *testing.T) {
 		Subjects:    store,
 		Bindings:    store,
 		Rotation:    store,
-		Credentials: server.BasicAuth(login),
+		Credentials: server.BasicAuth(login, nil),
 	})
 	explain := &server.AuthExplain{Subjects: store, Bindings: store}
 	explain.Register(router)

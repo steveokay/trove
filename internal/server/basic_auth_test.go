@@ -11,6 +11,7 @@ import (
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/memory"
+	"github.com/steveokay/trove/internal/secretbox"
 	"github.com/steveokay/trove/internal/server"
 )
 
@@ -70,7 +71,7 @@ func basicAuthFixture(t *testing.T, now *time.Time) http.Handler {
 	router := server.NewRouter(&server.Guard{
 		Subjects:    store,
 		Bindings:    store,
-		Credentials: server.BasicAuth(login),
+		Credentials: server.BasicAuth(login, nil),
 	})
 	router.HandleFunc(http.MethodGet, "/api/v1/system/gc", server.Permission{Verb: authz.GCRun},
 		func(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +141,63 @@ func TestBasicAuth(t *testing.T) {
 		rec := basicRequest(handler, "dan", "sesame")
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("robot secrets authenticate through the same guard", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		store := memory.New()
+		t.Cleanup(func() { _ = store.Close() })
+		if err := store.CreateSubject(ctx, meta.Subject{ID: "r-ci", Kind: meta.Robot, Name: "robot$ci"}); err != nil {
+			t.Fatalf("CreateSubject: %v", err)
+		}
+		if err := store.CreateRole(ctx, meta.Role{Name: "runner", Verbs: []string{"gc:run"}}); err != nil {
+			t.Fatalf("CreateRole: %v", err)
+		}
+		if err := store.CreateBinding(ctx, meta.Binding{
+			ID: "b-ci", PrincipalKind: meta.PrincipalSubject, PrincipalID: "r-ci",
+			Role: "runner", Scope: "system",
+		}); err != nil {
+			t.Fatalf("CreateBinding: %v", err)
+		}
+
+		key, err := secretbox.GenerateKey()
+		if err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+		ring, err := secretbox.NewKeyring(key)
+		if err != nil {
+			t.Fatalf("NewKeyring: %v", err)
+		}
+		robots := authn.NewRobotSecrets(store, ring, nil, nil)
+		secret, err := robots.Mint(ctx, "robot$ci", time.Time{})
+		if err != nil {
+			t.Fatalf("Mint: %v", err)
+		}
+		login, err := authn.NewPasswordLogin(store, nil, authn.NewHasher())
+		if err != nil {
+			t.Fatalf("NewPasswordLogin: %v", err)
+		}
+
+		router := server.NewRouter(&server.Guard{
+			Subjects:    store,
+			Bindings:    store,
+			Credentials: server.BasicAuth(login, robots),
+		})
+		router.HandleFunc(http.MethodGet, "/api/v1/system/gc", server.Permission{Verb: authz.GCRun},
+			func(w http.ResponseWriter, r *http.Request) {
+				subject, _ := server.SubjectFrom(r.Context())
+				_, _ = w.Write([]byte("ran as " + subject.Name))
+			})
+
+		if rec := basicRequest(router, "robot$ci", secret); rec.Code != http.StatusOK ||
+			rec.Body.String() != "ran as robot$ci" {
+			t.Fatalf("robot login: %d %q", rec.Code, rec.Body)
+		}
+		if rec := basicRequest(router, "robot$ci", "trove_r_r-ci_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong robot secret: %d, want 401", rec.Code)
 		}
 	})
 

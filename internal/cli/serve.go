@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 
 	"github.com/steveokay/trove/internal/authn"
@@ -10,6 +12,7 @@ import (
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/postgres"
 	"github.com/steveokay/trove/internal/meta/sqlite"
+	"github.com/steveokay/trove/internal/secretbox"
 	"github.com/steveokay/trove/internal/server"
 	"github.com/steveokay/trove/internal/version"
 )
@@ -60,7 +63,13 @@ func runServe(ctx context.Context, env Env, args []string) error {
 		return fmt.Errorf("build the login path: %w", err)
 	}
 
-	srv := server.New(cfg, log, buildRouter(store, login, log))
+	ring, err := openKeyring(cfg.Auth.SecretsKeyFile, log)
+	if err != nil {
+		return fmt.Errorf("open secrets keyfile: %w", err)
+	}
+	robots := authn.NewRobotSecrets(store, ring, limiter, nil)
+
+	srv := server.New(cfg, log, buildRouter(store, login, robots, log))
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -71,17 +80,40 @@ func runServe(ctx context.Context, env Env, args []string) error {
 // route, basic auth as the bootstrap-era credential path (ADR 0004), and the
 // must-rotate gate armed. A test walks the result, so what serve actually
 // serves is pinned rather than assumed.
-func buildRouter(store meta.Store, login *authn.PasswordLogin, log *slog.Logger) *server.Router {
+func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.RobotSecrets, log *slog.Logger) *server.Router {
 	router := server.NewRouter(&server.Guard{
 		Subjects:    store,
 		Bindings:    store,
 		Rotation:    store,
-		Credentials: server.BasicAuth(login),
+		Credentials: server.BasicAuth(login, robots),
 		Log:         log,
 	})
 	(&server.AuthExplain{Subjects: store, Bindings: store, Log: log}).Register(router)
 	(&server.AuthPassword{Login: login, Store: store, Hasher: authn.NewHasher(), Log: log}).Register(router)
 	return router
+}
+
+// openKeyring loads the secrets keyfile, generating one on the first run
+// (Q21): an operator should get a working deployment without ever thinking
+// about key material, but an existing keyfile that cannot be read is fatal --
+// with sealed values and credential digests in the database, starting with a
+// fresh key would silently orphan them all (ADR 0016).
+func openKeyring(path string, log *slog.Logger) (*secretbox.Keyring, error) {
+	ring, err := secretbox.Load(path)
+	if err == nil {
+		return ring, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	ring, err = secretbox.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	// Worth a log line: this file is now part of every backup (Q21).
+	log.Info("generated a new secrets keyfile", "path", path)
+	return ring, nil
 }
 
 // openMetaStore opens the configured metadata store. Both engines migrate on
