@@ -41,6 +41,7 @@ type Router struct {
 	guard  *Guard
 	mux    *http.ServeMux
 	routes []Route
+	oci    []ociRoute
 
 	// verified caches the table check the first request triggers. Routes are
 	// registered before serving starts -- the mux requires that anyway -- so
@@ -139,6 +140,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		Logger(req.Context(), nil).Error("refusing to serve an unverified route table",
 			"error", r.verifyErr)
 		ProblemErrors{}.Internal(w, req)
+		return
+	}
+	if handler, matched, ok := r.matchOCI(req); ok {
+		handler.ServeHTTP(w, matched)
 		return
 	}
 	r.mux.ServeHTTP(w, req)

@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
+	iofs "io/fs"
 	"log/slog"
+	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/steveokay/trove/internal/authn"
 	"github.com/steveokay/trove/internal/authn/token"
+	"github.com/steveokay/trove/internal/blob"
+	"github.com/steveokay/trove/internal/blob/fs"
+	"github.com/steveokay/trove/internal/blob/s3"
 	"github.com/steveokay/trove/internal/config"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/postgres"
 	"github.com/steveokay/trove/internal/meta/sqlite"
+	"github.com/steveokay/trove/internal/registry"
 	"github.com/steveokay/trove/internal/secretbox"
 	"github.com/steveokay/trove/internal/server"
 	"github.com/steveokay/trove/internal/version"
@@ -80,7 +86,12 @@ func runServe(ctx context.Context, env Env, args []string) error {
 		return fmt.Errorf("build the token signer: %w", err)
 	}
 
-	srv := server.New(cfg, log, buildRouter(store, login, robots, signer, cfg.Server.ExternalURL, log))
+	hosted, err := openHostedBlobStore(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("open blob storage: %w", err)
+	}
+
+	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, cfg.Server.ExternalURL, log))
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -92,8 +103,8 @@ func runServe(ctx context.Context, env Env, args []string) error {
 // (ADR 0004), the must-rotate gate armed, and the OCI token flow's two
 // endpoints. A test walks the result, so what serve actually serves is pinned
 // rather than assumed.
-func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.RobotSecrets,
-	signer *token.Signer, externalURL string, log *slog.Logger,
+func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.PasswordLogin,
+	robots *authn.RobotSecrets, signer *token.Signer, externalURL string, log *slog.Logger,
 ) *server.Router {
 	challenge := server.TokenChallenge(externalURL)
 	credentials := server.Bearer(signer, server.BasicAuth(login, robots))
@@ -104,7 +115,10 @@ func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.Rob
 		Rotation:    store,
 		Credentials: credentials,
 		Challenge:   challenge,
-		Log:         log,
+		// The two error contracts, split by path: the OCI tree speaks the
+		// spec's envelope, everything else problem+json (ADR 0015).
+		Errors: server.SplitErrors{V2: registry.SpecErrors{}, Default: server.ProblemErrors{}},
+		Log:    log,
 	})
 	(&server.AuthExplain{Subjects: store, Bindings: store, Log: log}).Register(router)
 	(&server.AuthPassword{Login: login, Store: store, Hasher: authn.NewHasher(), Log: log}).Register(router)
@@ -115,7 +129,39 @@ func buildRouter(store meta.Store, login *authn.PasswordLogin, robots *authn.Rob
 	(&server.V2Root{
 		Credentials: credentials, Subjects: store, Challenge: challenge, Log: log,
 	}).Register(router)
+	(&registry.Blobs{Store: hosted, Meta: store, Bindings: store, Log: log}).Register(router)
 	return router
+}
+
+// openHostedBlobStore opens the configured driver over the *hosted* half of
+// the storage: cached content gets its own disjoint instance when Phase 4
+// wires it, and the separation is made here, at wiring time (ADR 0009).
+func openHostedBlobStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (registry.BlobStore, error) {
+	corrupt := func(_ context.Context, desc blob.Descriptor, err error) {
+		// The blob.corrupt event lands with E-001; until then the log is the
+		// audit trail for quarantined content.
+		log.Error("corrupt blob quarantined", "digest", desc.Digest, "error", err)
+	}
+	switch cfg.Storage.Driver {
+	case "s3":
+		return s3.New(ctx, s3.Options{
+			Endpoint:        cfg.Storage.S3.Endpoint,
+			Bucket:          cfg.Storage.S3.Bucket,
+			Region:          cfg.Storage.S3.Region,
+			Prefix:          path.Join(cfg.Storage.S3.Prefix, "hosted"),
+			AccessKeyID:     cfg.Storage.S3.AccessKeyID,
+			SecretAccessKey: cfg.Storage.S3.SecretAccessKey,
+			UseSSL:          cfg.Storage.S3.UseSSL,
+			Redirect:        cfg.Storage.S3.Redirect,
+			OnCorrupt:       corrupt,
+		})
+	default:
+		// Config validation admits only fs and s3, and fs is the default.
+		return fs.New(fs.Options{
+			Root:      filepath.Join(cfg.Storage.FS.Root, "hosted"),
+			OnCorrupt: corrupt,
+		})
+	}
 }
 
 // openKeyring loads the secrets keyfile, generating one on the first run
@@ -128,7 +174,7 @@ func openKeyring(path string, log *slog.Logger) (*secretbox.Keyring, error) {
 	if err == nil {
 		return ring, nil
 	}
-	if !errors.Is(err, fs.ErrNotExist) {
+	if !errors.Is(err, iofs.ErrNotExist) {
 		return nil, err
 	}
 

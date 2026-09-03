@@ -18,6 +18,7 @@ import (
 
 	"github.com/steveokay/trove/internal/authn"
 	"github.com/steveokay/trove/internal/authn/token"
+	blobmem "github.com/steveokay/trove/internal/blob/memory"
 	"github.com/steveokay/trove/internal/meta/memory"
 )
 
@@ -256,7 +257,7 @@ func TestAssembledRouteTable(t *testing.T) {
 		t.Fatalf("NewSigner: %v", err)
 	}
 
-	router := buildRouter(store, login, nil, signer, "", nil)
+	router := buildRouter(store, blobmem.New(blobmem.Options{}), login, nil, signer, "", nil)
 	if err := router.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -357,6 +358,28 @@ func TestServeSpeaksTheDockerTokenFlow(t *testing.T) {
 	// The signing key was created beside the secrets key.
 	if _, err := os.Stat(filepath.Join(dir, "keys", "token-signing.key")); err != nil {
 		t.Errorf("token signing key after boot: %v", err)
+	}
+
+	// The registry routes are live and speak the spec's envelope, never
+	// problem+json: this admin has not rotated the bootstrap password yet, so
+	// the must-rotate gate refuses the push -- as a spec-shaped DENIED whose
+	// message names the way out. The full push flow is proven at the handler
+	// layer; live repository creation waits on C-016's admin API.
+	push, err := http.NewRequest(http.MethodPost, base+"/v2/team-a/api/blobs/uploads/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	push.Header.Set("Authorization", "Bearer "+minted.Token)
+	pushed, err := http.DefaultClient.Do(push)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	body := new(strings.Builder)
+	_, _ = io.Copy(body, pushed.Body)
+	_ = pushed.Body.Close()
+	if pushed.StatusCode != http.StatusForbidden ||
+		!strings.Contains(body.String(), "DENIED") || !strings.Contains(body.String(), "rotation") {
+		t.Fatalf("unrotated push: %d %s, want a spec-shaped DENIED naming the rotation", pushed.StatusCode, body)
 	}
 
 	cancel()

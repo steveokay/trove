@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -67,6 +68,42 @@ const (
 	ProblemRotationRequired = "rotation-required"
 	ProblemInternal         = "internal"
 )
+
+// SplitErrors routes refusals by contract (ADR 0015): the /v2/ tree answers
+// in the distribution spec's envelope, everything else in problem+json. The
+// two are never mixed -- a docker client parsing a problem document, or a
+// dashboard parsing the spec envelope, is a bug either way.
+type SplitErrors struct {
+	// V2 renders for paths under /v2/.
+	V2 ErrorRenderer
+	// Default renders everything else.
+	Default ErrorRenderer
+}
+
+var _ ErrorRenderer = SplitErrors{}
+
+func (s SplitErrors) pick(r *http.Request) ErrorRenderer {
+	if r.URL.Path == "/v2" || strings.HasPrefix(r.URL.Path, "/v2/") {
+		return s.V2
+	}
+	return s.Default
+}
+
+func (s SplitErrors) Unauthorized(w http.ResponseWriter, r *http.Request, challenge string) {
+	s.pick(r).Unauthorized(w, r, challenge)
+}
+func (s SplitErrors) Forbidden(w http.ResponseWriter, r *http.Request) { s.pick(r).Forbidden(w, r) }
+func (s SplitErrors) NotFound(w http.ResponseWriter, r *http.Request)  { s.pick(r).NotFound(w, r) }
+func (s SplitErrors) BadRequest(w http.ResponseWriter, r *http.Request, reason string) {
+	s.pick(r).BadRequest(w, r, reason)
+}
+func (s SplitErrors) TooManyRequests(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	s.pick(r).TooManyRequests(w, r, retryAfter)
+}
+func (s SplitErrors) RotationRequired(w http.ResponseWriter, r *http.Request) {
+	s.pick(r).RotationRequired(w, r)
+}
+func (s SplitErrors) Internal(w http.ResponseWriter, r *http.Request) { s.pick(r).Internal(w, r) }
 
 // ProblemErrors renders the admin API's problem+json.
 type ProblemErrors struct{}
