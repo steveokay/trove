@@ -55,7 +55,7 @@ var pendingVerbs = map[authz.Verb]string{
 	authz.SearchRead:        "E-010 cross-repo search",
 	authz.UserWrite:         "user admin API (U-007's server half)",
 	authz.RoleRead:          "role/binding admin API (U-007's server half)",
-	authz.RoleWrite:         "Z-015 self-lockout prevention",
+	authz.RoleWrite:         "role/binding admin API (U-007's server half)",
 	authz.AuditRead:         "E-009 audit log",
 	authz.SystemMaintenance: "E-008 read-only mode",
 }
