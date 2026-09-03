@@ -13,11 +13,14 @@ import (
 // A verb with no negative test is an unenforced verb, and it looks exactly
 // like an enforced one from the outside.
 //
-// Nothing enforces any verb yet -- the handlers arrive in Z-010 -- so every
-// verb starts on the allowlist below. The list is a ratchet: a verb that
-// acquires tests fails this test until its entry is removed, so it can only
-// shrink. When the last entry goes, §9's requirement is met in full and this
-// test becomes the thing that keeps it met.
+// The allowlist below is what nothing enforces yet. It is a ratchet: a verb
+// that acquires tests fails this test until its entry is removed, so it can
+// only shrink. When the last entry goes, §9's requirement is met in full and
+// this test becomes the thing that keeps it met.
+//
+// Z-010 took the first three off it -- repo:read, repo:write and gc:run are
+// exercised both ways by the handler matrix, which is where a verb is really
+// enforced. The rest come off as their handlers land.
 func TestEveryVerbHasBothPolarities(t *testing.T) {
 	t.Parallel()
 
@@ -29,8 +32,6 @@ func TestEveryVerbHasBothPolarities(t *testing.T) {
 // requires deleting tests, which is the point.
 var pendingVerbs = map[authz.Verb]string{
 	authz.RepoList:          "Z-012 permission-filtered listings",
-	authz.RepoRead:          "Z-010 handler enforcement",
-	authz.RepoWrite:         "Z-010 handler enforcement",
 	authz.TagDelete:         "R-003 tag handlers",
 	authz.ManifestDelete:    "R-002 manifest handlers",
 	authz.ReferrerRead:      "R-005 referrers API",
@@ -56,7 +57,6 @@ var pendingVerbs = map[authz.Verb]string{
 	authz.RoleRead:          "Z-013 effective-permission explainer",
 	authz.RoleWrite:         "Z-015 self-lockout prevention",
 	authz.AuditRead:         "E-009 audit log",
-	authz.GCRun:             "P-007 garbage collection",
 	authz.SystemMaintenance: "E-008 read-only mode",
 }
 
