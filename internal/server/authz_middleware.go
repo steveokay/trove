@@ -23,6 +23,18 @@ type Permission struct {
 	// repository name out of the path. A nil Resource means the route is about
 	// the system itself: user administration, garbage collection, maintenance.
 	Resource func(*http.Request) (authz.Resource, error)
+	// Self, when set, marks a route about a subject rather than a repository:
+	// the explainer, password rotation, a subject's own tokens. It extracts
+	// the subject name the request asks about, with empty meaning the caller.
+	//
+	// A subject may always act on itself -- that is the rule, declared here so
+	// the route table shows it, not a bypass of one (ADR 0003 surface 8). Verb
+	// is consulted only when the target is somebody else, at the system scope,
+	// since subjects are not repositories. A self-admitted request carries no
+	// Decision in its context: nothing was decided, the rule is structural.
+	//
+	// Mutually exclusive with Resource; Handle refuses a route with both.
+	Self func(*http.Request) (string, error)
 }
 
 // resolve returns the resource a request is about.
@@ -122,10 +134,27 @@ func (g *Guard) Require(perm Permission, next http.Handler) http.Handler {
 			errs.BadRequest(w, r, err.Error())
 			return
 		}
+		var target string
+		if perm.Self != nil {
+			// The target comes out of the request the same way a resource
+			// does, and an unusable one is refused the same way: before
+			// anything is looked up or decided.
+			if target, err = perm.Self(r); err != nil {
+				errs.BadRequest(w, r, err.Error())
+				return
+			}
+		}
 
 		subject, err := g.subject(ctx, r)
 		if err != nil {
 			g.refuseUnauthenticated(w, r, err)
+			return
+		}
+
+		if perm.Self != nil && (target == "" || target == subject.Name) {
+			// Self-access. No bindings are consulted and no Decision is
+			// stored: the admission is the declared rule, not a grant.
+			next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, subjectKey, subject)))
 			return
 		}
 

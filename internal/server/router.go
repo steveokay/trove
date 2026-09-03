@@ -70,6 +70,11 @@ func (r *Router) Handle(method, pattern string, permission Permission, handler h
 		panic(fmt.Sprintf("server: route %s %s registered with unknown verb %q",
 			method, pattern, permission.Verb))
 	}
+	if permission.Resource != nil && permission.Self != nil {
+		// A route is about a repository or about a subject, never both: the
+		// two extractors would be competing for the same verb.
+		panic(fmt.Sprintf("server: route %s %s registered with both Resource and Self", method, pattern))
+	}
 
 	r.record(Route{Method: method, Pattern: pattern, Permission: permission})
 	r.mux.Handle(method+" "+pattern, r.guard.Require(permission, handler))

@@ -126,7 +126,7 @@ func TestRunHelp(t *testing.T) {
 
 // implemented lists commands with real behaviour, which therefore must not be
 // asserted to report "not implemented". Each has its own tests.
-var implemented = map[string]bool{"version": true, "serve": true}
+var implemented = map[string]bool{"version": true, "serve": true, "auth": true}
 
 func TestUnimplementedCommandsReportPlainly(t *testing.T) {
 	t.Parallel()

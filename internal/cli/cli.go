@@ -41,7 +41,7 @@ var commands = []command{
 	{"verify", "verify stored content against recorded digests", notImplemented("verify")},
 	{"db", "manage the vulnerability database", notImplemented("db")},
 	{"policy", "inspect and apply policies", notImplemented("policy")},
-	{"auth", "inspect authentication and effective permissions", notImplemented("auth")},
+	{"auth", "inspect authentication and effective permissions", runAuth},
 	{"admin", "administrative operations", notImplemented("admin")},
 	{"support-bundle", "collect a diagnostic bundle", notImplemented("support-bundle")},
 	{"version", "print build information", runVersion},
