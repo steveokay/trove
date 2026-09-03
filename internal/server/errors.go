@@ -59,9 +59,9 @@ type Problem struct {
 // The problem type slugs. They are part of the API contract: a client matches
 // on these rather than on the prose, which is free to improve.
 const (
-	ProblemUnauthorized = "unauthorized"
-	ProblemForbidden    = "forbidden"
-	ProblemNotFound     = "not-found"
+	ProblemUnauthorized     = "unauthorized"
+	ProblemForbidden        = "forbidden"
+	ProblemNotFound         = "not-found"
 	ProblemBadRequest       = "bad-request"
 	ProblemRateLimited      = "rate-limited"
 	ProblemRotationRequired = "rotation-required"

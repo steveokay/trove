@@ -85,10 +85,10 @@ func TestMustRotateGate(t *testing.T) {
 		subject string
 		want    int
 	}{
-		{"fresh", http.StatusForbidden},   // must rotate
-		{"settled", http.StatusOK},        // rotated already
-		{"tokenonly", http.StatusOK},      // no password credential: nothing to rotate
-		{"bot", http.StatusOK},            // robots have no passwords
+		{"fresh", http.StatusForbidden},        // must rotate
+		{"settled", http.StatusOK},             // rotated already
+		{"tokenonly", http.StatusOK},           // no password credential: nothing to rotate
+		{"bot", http.StatusOK},                 // robots have no passwords
 		{"anonymous", http.StatusUnauthorized}, // unrelated to the gate; sanity
 	}
 	for _, tt := range tests {
