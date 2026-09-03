@@ -485,6 +485,18 @@ func Rules() []Rule {
 			Mode: Direct,
 		},
 		{
+			Name:   "password-hashing-is-quarantined",
+			Reason: "ADR 0004 / Z-002: internal/authn owns password hashing. A second caller of the primitive is a second set of cost parameters and a second encoding, and the one that drifts is the one nobody is looking at.",
+			From:   []string{modulePath + "/..."},
+			Except: []string{pkg("internal/authn") + "/..."},
+			Forbidden: []string{
+				"golang.org/x/crypto/argon2",
+				"golang.org/x/crypto/bcrypt",
+				"golang.org/x/crypto/scrypt",
+			},
+			Mode: Direct,
+		},
+		{
 			Name:   "aead-primitives-are-quarantined",
 			Reason: "ADR 0016: internal/secretbox owns encrypt/decrypt/rotate and is the only importer of the AEAD primitives, so every use of them is auditable in one file.",
 			From:   []string{modulePath + "/..."},
