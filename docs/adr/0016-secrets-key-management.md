@@ -16,9 +16,9 @@ Blob payloads are explicitly out of scope (Q13).
 
 ### Key material
 
-- `<data>/keys/secrets.key` — 32 random bytes, created on first run with 0600
+- `<data>/keys/secrets.key` — 32-byte keys, created on first run with 0600
   permissions (and a warning if the directory is group/world accessible). Path
-  overridable via `keys.secrets_key_file` for operators mounting a secret from
+  overridable via `auth.secrets_key_file` for operators mounting a secret from
   their platform.
 - `<data>/keys/token-signing.key` — the Ed25519 seed (ADR 0004), same handling.
 - Both are the operator's **must-back-up** set, documented together in DOC-002:
@@ -58,6 +58,35 @@ Blob payloads are explicitly out of scope (Q13).
   the verb).
 - A missing or unreadable keyfile at startup with encrypted values present in the
   database is a fatal, loudly-explained startup error — never a silent re-key.
+
+### Clarifications (Z-003a, 2026-09-03)
+
+Three points this ADR left ambiguous, resolved while implementing
+`internal/secretbox`. The decisions above are unchanged; these say what they
+mean in practice.
+
+- **The keyfile is text, one base64-encoded 32-byte key per line.** "32 random
+  bytes" and "line-delimited" are incompatible read literally: raw key material
+  contains `0x0a`, so a multi-key file could not be split into lines. Standard
+  base64 per line is the only reading that satisfies both.
+- **Blank lines and `#` comments are ignored.** Rotation is a two-step
+  operation with a retired key sitting in the file until the operator removes
+  it; being unable to label that line makes the instruction "remove the retired
+  line" harder to follow than it needs to be. A file containing nothing but
+  blanks and comments is an error, not an empty keyring.
+- **The permission check is strict by default with an explicit opt-out.** A
+  group- or world-readable keyfile is refused, because that is almost always an
+  accident. Platform-mounted secrets are named above as a supported path and
+  arrive 0644 (a Kubernetes secret volume, for instance), so the loader takes an
+  option to accept them deliberately. The check is skipped on Windows, where the
+  bits do not mean what they say (Q25).
+- **HMAC keying stays in `internal/secretbox`.** Robot and PAT digests are keyed
+  by the secrets key (above), and the obvious place for that helper is
+  `internal/authn`, where the digests are used. It goes here instead: handing
+  `authn` the raw key material to do its own HMAC would spread key handling
+  across two packages and cost exactly the property this ADR's consequences
+  claim — that every use of key material is auditable in one file. Z-003b
+  consumes a helper exposed here rather than exporting the key.
 
 ## Rejected alternatives
 
