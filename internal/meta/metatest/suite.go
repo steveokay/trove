@@ -1173,6 +1173,9 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"GetRole", func() error { _, err := s.GetRole(ctx, "r"); return err }},
 		{"ListRoles", func() error { _, err := s.ListRoles(ctx); return err }},
 		{"UpdateRoleVerbs", func() error { return s.UpdateRoleVerbs(ctx, "r", nil) }},
+		{"PutBuiltinRole", func() error {
+			return s.PutBuiltinRole(ctx, meta.Role{Name: "r", Builtin: true, Verbs: []string{"repo:read"}})
+		}},
 		{"DeleteRole", func() error { return s.DeleteRole(ctx, "r") }},
 		{"CreateBinding", func() error {
 			return s.CreateBinding(ctx, meta.Binding{

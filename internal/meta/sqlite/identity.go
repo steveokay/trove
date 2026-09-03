@@ -443,6 +443,43 @@ func (s *Store) ListRoles(ctx context.Context) ([]meta.Role, error) {
 // UpdateRoleVerbs replaces a custom role's verb set. Redefining a built-in
 // would silently change what every binding to it grants, so built-ins are
 // read-only.
+// PutBuiltinRole creates or replaces a built-in role's definition (Z-014).
+// The role row is updated in place rather than recreated, so bindings that
+// name it survive: replacement is an upgrade, not a deletion.
+func (s *Store) PutBuiltinRole(ctx context.Context, role meta.Role) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if !role.Builtin {
+		return meta.Invalid("role", "only a built-in role may travel the seeding path")
+	}
+	if role.Name == "" {
+		return meta.Invalid("name", "must not be empty")
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		existing, err := s.role(ctx, tx, role.Name)
+		switch {
+		case errors.Is(err, meta.ErrNotFound):
+			if _, err := sqlutil.Execute(ctx, tx,
+				`INSERT INTO roles (name, builtin) VALUES (?, ?)`, role.Name, true); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case !existing.Builtin:
+			// A custom role of the same name is an operator's, not ours.
+			return meta.Conflict("role", role.Name)
+		default:
+			if _, err := sqlutil.Execute(ctx, tx,
+				`DELETE FROM role_verbs WHERE role_name = ?`, role.Name); err != nil {
+				return err
+			}
+		}
+		return insertVerbs(ctx, tx, role.Name, role.Verbs)
+	})
+}
+
 func (s *Store) UpdateRoleVerbs(ctx context.Context, name string, verbs []string) error {
 	if err := s.ready(ctx); err != nil {
 		return err

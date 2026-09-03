@@ -19,6 +19,7 @@ func identityTests() []suiteCase {
 		{"GroupCRUD", testGroupCRUD},
 		{"RoleCRUD", testRoleCRUD},
 		{"BuiltinRolesAreReadOnly", testBuiltinRolesAreReadOnly},
+		{"PutBuiltinRoleConverges", testPutBuiltinRoleConverges},
 		{"BindingCRUD", testBindingCRUD},
 		{"BindingIntegrity", testBindingIntegrity},
 		{"EffectiveBindingsIncludeGroups", testEffectiveBindingsIncludeGroups},
@@ -351,6 +352,84 @@ func testRoleCRUD(t *testing.T, s meta.Store) {
 	}
 	_, err = s.GetRole(ctx(), "publisher")
 	requireErrIs(t, err, meta.ErrNotFound, "GetRole after delete")
+}
+
+func testPutBuiltinRoleConverges(t *testing.T, s meta.Store) {
+	// The seeding path (Z-014). Operators cannot edit built-ins, but the
+	// system itself must be able to bring "admin means every verb" back to
+	// true after an upgrade grows the vocabulary -- or after somebody edits
+	// the row in the database, which this heals at the next start.
+
+	// Only a role marked builtin may travel this path.
+	requireErrIs(t, s.PutBuiltinRole(ctx(), meta.Role{Name: "sneaky", Verbs: []string{"repo:read"}}),
+		meta.ErrInvalid, "PutBuiltinRole without the builtin flag")
+	requireErrIs(t, s.PutBuiltinRole(ctx(), meta.Role{Builtin: true, Verbs: []string{"repo:read"}}),
+		meta.ErrInvalid, "PutBuiltinRole without a name")
+
+	// Creates when absent.
+	if err := s.PutBuiltinRole(ctx(), meta.Role{
+		Name: "admin", Builtin: true, Verbs: []string{"repo:read", "repo:write"},
+	}); err != nil {
+		t.Fatalf("PutBuiltinRole (create): %v", err)
+	}
+	got, err := s.GetRole(ctx(), "admin")
+	if err != nil {
+		t.Fatalf("GetRole: %v", err)
+	}
+	if !got.Builtin || len(got.Verbs) != 2 {
+		t.Fatalf("stored role = %+v, want builtin with two verbs", got)
+	}
+
+	// A binding referencing the role must survive replacement: replacing the
+	// definition is an upgrade, not a deletion, and an engine that modelled it
+	// as delete-and-recreate would cascade every admin binding away.
+	mustCreateSubject(t, s, "alice", meta.User)
+	if err := s.CreateBinding(ctx(), meta.Binding{
+		ID: "b-keep", PrincipalKind: meta.PrincipalSubject, PrincipalID: "id-alice",
+		Role: "admin", Scope: "system",
+	}); err != nil {
+		t.Fatalf("CreateBinding: %v", err)
+	}
+
+	// Replaces wholesale when present: the new set is exact, not merged.
+	if err := s.PutBuiltinRole(ctx(), meta.Role{
+		Name: "admin", Builtin: true, Verbs: []string{"repo:read", "user:write", "gc:run"},
+	}); err != nil {
+		t.Fatalf("PutBuiltinRole (replace): %v", err)
+	}
+	got, err = s.GetRole(ctx(), "admin")
+	if err != nil {
+		t.Fatalf("GetRole after replace: %v", err)
+	}
+	want := map[string]bool{"repo:read": true, "user:write": true, "gc:run": true}
+	if len(got.Verbs) != len(want) {
+		t.Fatalf("verbs after replace = %v, want exactly %v", got.Verbs, want)
+	}
+	for _, verb := range got.Verbs {
+		if !want[verb] {
+			t.Fatalf("verbs after replace = %v, want exactly %v", got.Verbs, want)
+		}
+	}
+	if !got.Builtin {
+		t.Error("replacement dropped the builtin flag")
+	}
+	if _, err := s.GetBinding(ctx(), "b-keep"); err != nil {
+		t.Errorf("GetBinding after replace: %v, want the binding to survive", err)
+	}
+
+	// A custom role is an operator's, and this path may not overwrite it.
+	if err := s.CreateRole(ctx(), meta.Role{Name: "theirs", Verbs: []string{"repo:read"}}); err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+	requireErrIs(t, s.PutBuiltinRole(ctx(), meta.Role{Name: "theirs", Builtin: true, Verbs: []string{"gc:run"}}),
+		meta.ErrConflict, "PutBuiltinRole over a custom role")
+	got, err = s.GetRole(ctx(), "theirs")
+	if err != nil {
+		t.Fatalf("GetRole(theirs): %v", err)
+	}
+	if got.Builtin || len(got.Verbs) != 1 || got.Verbs[0] != "repo:read" {
+		t.Errorf("custom role after refused put = %+v, want it untouched", got)
+	}
 }
 
 func testBuiltinRolesAreReadOnly(t *testing.T, s meta.Store) {

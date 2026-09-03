@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveokay/trove/internal/authn"
 	"github.com/steveokay/trove/internal/authz"
+	"github.com/steveokay/trove/internal/meta"
 )
 
 // Permission is what a route requires: one verb, and the resource it applies
@@ -35,6 +36,11 @@ type Permission struct {
 	//
 	// Mutually exclusive with Resource; Handle refuses a route with both.
 	Self func(*http.Request) (string, error)
+	// RotationExempt lets a subject whose password demands rotation reach
+	// this route. It exists for exactly one route -- the rotation endpoint --
+	// because a gate with no door is a lockout, not a policy (Z-014). Every
+	// other route answers such a subject with the rotation-required refusal.
+	RotationExempt bool
 }
 
 // resolve returns the resource a request is about.
@@ -75,6 +81,13 @@ type Guard struct {
 	// Errors renders refusals. Nil means ProblemErrors, the admin API's shape;
 	// the OCI routes supply their own spec-shaped renderer (R-008).
 	Errors ErrorRenderer
+	// Rotation supplies password credentials for the must-rotate gate
+	// (Z-014): a user whose credential demands rotation is refused on every
+	// route not marked RotationExempt, so a bootstrap password cannot be used
+	// for anything except replacing itself. Nil disables the gate -- for
+	// deployments wired before credentials existed, and for tests that are
+	// not about it.
+	Rotation RotationStore
 	// OnDenied is called for every refusal. Z-016 hangs the authz.denied event
 	// and its metric here; until then the guard logs each one, because a
 	// denial nobody can see is a misconfiguration nobody can find.
@@ -151,6 +164,22 @@ func (g *Guard) Require(perm Permission, next http.Handler) http.Handler {
 			return
 		}
 
+		if !perm.RotationExempt {
+			switch blocked, err := g.rotationDue(ctx, subject); {
+			case err != nil:
+				// The gate could not be evaluated, so it has not passed:
+				// same fail-closed rule as an unreadable binding.
+				Logger(ctx, g.Log).Error("the rotation gate could not read the credential",
+					"subject", subject.Name, "error", err)
+				errs.Internal(w, r)
+				return
+			case blocked:
+				Logger(ctx, g.Log).Info("refused pending password rotation", "subject", subject.Name)
+				errs.RotationRequired(w, r)
+				return
+			}
+		}
+
 		if perm.Self != nil && (target == "" || target == subject.Name) {
 			// Self-access. No bindings are consulted and no Decision is
 			// stored: the admission is the declared rule, not a grant.
@@ -181,6 +210,28 @@ func (g *Guard) Require(perm Permission, next http.Handler) http.Handler {
 	})
 }
 
+// RotationStore is the slice of the store the must-rotate gate reads.
+type RotationStore interface {
+	GetUserCredential(ctx context.Context, subject string) (meta.UserCredential, error)
+}
+
+// rotationDue reports whether the subject is barred pending a password
+// change. Only users have passwords; a user without a password credential --
+// token-only, or password login disabled -- has nothing to rotate.
+func (g *Guard) rotationDue(ctx context.Context, subject authn.Subject) (bool, error) {
+	if g.Rotation == nil || subject.Kind != authn.User {
+		return false, nil
+	}
+	cred, err := g.Rotation.GetUserCredential(ctx, subject.Name)
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return cred.MustRotate, nil
+}
+
 // subject resolves who the request is from.
 func (g *Guard) subject(ctx context.Context, r *http.Request) (authn.Subject, error) {
 	credentials := g.Credentials
@@ -198,7 +249,18 @@ func (g *Guard) subject(ctx context.Context, r *http.Request) (authn.Subject, er
 func (g *Guard) refuseUnauthenticated(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 
+	var limited *authn.RateLimitedError
 	switch {
+	case errors.As(err, &limited):
+		// The limiter refused before anything was evaluated; the wait is
+		// exact, so the Retry-After can be honest (Z-002).
+		Logger(ctx, g.Log).Info("authentication rate limited", "retry_after", limited.RetryAfter)
+		g.errors().TooManyRequests(w, r, limited.RetryAfter)
+	case errors.Is(err, authn.ErrBadCredentials):
+		// Wrong password and unknown user arrive here as the same error on
+		// purpose; the client gets the challenge and may try again.
+		Logger(ctx, g.Log).Info("authentication failed", "error", err)
+		g.errors().Unauthorized(w, r, g.challenge())
 	case errors.Is(err, authn.ErrNoAnonymousSubject):
 		// The deployment is broken, not the request: without that row there is
 		// no subject for an unauthenticated request to be.

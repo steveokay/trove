@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 // ErrorRenderer writes the refusals an authorization check produces.
@@ -25,6 +27,14 @@ type ErrorRenderer interface {
 	NotFound(w http.ResponseWriter, r *http.Request)
 	// BadRequest answers a request whose target could not be parsed.
 	BadRequest(w http.ResponseWriter, r *http.Request, reason string)
+	// TooManyRequests answers a rate-limited request with a truthful
+	// Retry-After: the limiter's arithmetic is exact so the promise can be
+	// (Z-002, ADR 0004).
+	TooManyRequests(w http.ResponseWriter, r *http.Request, retryAfter time.Duration)
+	// RotationRequired answers a subject barred pending a password change
+	// (Z-014). It must say how to get out: a refusal with no door is a
+	// lockout the operator reads as an outage.
+	RotationRequired(w http.ResponseWriter, r *http.Request)
 	// Internal answers a failure on our side. It never explains itself to the
 	// client; the log carries the detail.
 	Internal(w http.ResponseWriter, r *http.Request)
@@ -52,8 +62,10 @@ const (
 	ProblemUnauthorized = "unauthorized"
 	ProblemForbidden    = "forbidden"
 	ProblemNotFound     = "not-found"
-	ProblemBadRequest   = "bad-request"
-	ProblemInternal     = "internal"
+	ProblemBadRequest       = "bad-request"
+	ProblemRateLimited      = "rate-limited"
+	ProblemRotationRequired = "rotation-required"
+	ProblemInternal         = "internal"
 )
 
 // ProblemErrors renders the admin API's problem+json.
@@ -90,6 +102,24 @@ func (p ProblemErrors) NotFound(w http.ResponseWriter, r *http.Request) {
 // BadRequest writes 400 with the reason.
 func (p ProblemErrors) BadRequest(w http.ResponseWriter, r *http.Request, reason string) {
 	p.write(w, r, http.StatusBadRequest, ProblemBadRequest, "Bad request", reason)
+}
+
+// TooManyRequests writes 429 with a Retry-After the client can trust.
+func (p ProblemErrors) TooManyRequests(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	// Retry-After is integer seconds; rounding up keeps the promise true --
+	// a client that waits the stated time is never refused again for being
+	// a fraction of a second early.
+	seconds := max(int64(retryAfter+time.Second-1)/int64(time.Second), 1)
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	p.write(w, r, http.StatusTooManyRequests, ProblemRateLimited,
+		"Too many requests", "")
+}
+
+// RotationRequired writes 403 with the way out in the detail.
+func (p ProblemErrors) RotationRequired(w http.ResponseWriter, r *http.Request) {
+	p.write(w, r, http.StatusForbidden, ProblemRotationRequired,
+		"Password rotation required",
+		"change your password with POST /api/v1/auth/password, then retry")
 }
 
 // Internal writes 500 without explaining itself.

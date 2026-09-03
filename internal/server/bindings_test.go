@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/meta"
@@ -295,6 +296,14 @@ func (e *recordingRenderer) Forbidden(w http.ResponseWriter, _ *http.Request) {
 
 func (e *recordingRenderer) NotFound(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
+}
+
+func (e *recordingRenderer) TooManyRequests(w http.ResponseWriter, _ *http.Request, _ time.Duration) {
+	w.WriteHeader(http.StatusTooManyRequests)
+}
+
+func (e *recordingRenderer) RotationRequired(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusForbidden)
 }
 
 func (e *recordingRenderer) BadRequest(w http.ResponseWriter, _ *http.Request, _ string) {

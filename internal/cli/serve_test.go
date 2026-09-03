@@ -3,12 +3,16 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveokay/trove/internal/authn"
+	"github.com/steveokay/trove/internal/meta/memory"
 )
 
 // syncBuffer is an io.Writer safe to read while a server goroutine logs into
@@ -30,10 +34,16 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// newServeEnv returns an Env whose stderr can be read while serve is running.
+// newServeEnv returns an Env whose streams can be read while serve is
+// running: stdout for the one-time bootstrap credentials, stderr for logs.
 func newServeEnv() (Env, *syncBuffer) {
-	logs := &syncBuffer{}
-	return Env{Stdout: &syncBuffer{}, Stderr: logs}, logs
+	env, _, logs := newServeStreams()
+	return env, logs
+}
+
+func newServeStreams() (Env, *syncBuffer, *syncBuffer) {
+	stdout, logs := &syncBuffer{}, &syncBuffer{}
+	return Env{Stdout: stdout, Stderr: logs}, stdout, logs
 }
 
 // waitForServing blocks until the serve command reports that it is listening.
@@ -122,6 +132,11 @@ func TestServeRejectsBadConfiguration(t *testing.T) {
 			args: []string{"serve", "-config", "/definitely/not/here.yaml"},
 			want: "here.yaml",
 		},
+		{
+			name: "unusable postgres DSN",
+			args: []string{"serve", "-database.driver", "postgres", "-database.dsn", "://not-a-dsn"},
+			want: "open metadata store",
+		},
 	}
 
 	for _, tt := range tests {
@@ -172,21 +187,138 @@ func TestServeFailsWhenDataDirIsAlreadyServed(t *testing.T) {
 	}
 }
 
-func TestPlaceholderHandlerRefusesExplicitly(t *testing.T) {
+// The assembled table is a security artifact: every route guarded, none
+// public, and exactly one door through the rotation gate. Walking it here
+// means adding a route to serve without thinking about these properties fails
+// a test rather than shipping.
+func TestAssembledRouteTable(t *testing.T) {
 	t.Parallel()
 
-	rec := httptest.NewRecorder()
-	placeholderHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/", nil))
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503 rather than a misleading 404", rec.Code)
+	store := memory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	login, err := authn.NewPasswordLogin(store, nil, authn.NewHasher())
+	if err != nil {
+		t.Fatalf("NewPasswordLogin: %v", err)
 	}
 
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("body is not JSON (%q): %v", rec.Body.String(), err)
+	router := buildRouter(store, login, nil)
+	if err := router.Verify(); err != nil {
+		t.Fatalf("Verify: %v", err)
 	}
-	if body["path"] != "/v2/" {
-		t.Errorf("body = %v, want it to echo the path", body)
+
+	var exempt []string
+	for _, route := range router.Routes() {
+		if route.Public() {
+			t.Errorf("%s %s is public; serve registers no public routes yet", route.Method, route.Pattern)
+		}
+		if route.Permission.RotationExempt {
+			exempt = append(exempt, route.Method+" "+route.Pattern)
+		}
+	}
+	if len(exempt) != 1 || exempt[0] != "POST /api/v1/auth/password" {
+		t.Errorf("rotation-exempt routes = %v, want exactly the rotation endpoint", exempt)
+	}
+}
+
+// servingAddress digs the listener's resolved address out of the JSON logs.
+func servingAddress(t *testing.T, logs *syncBuffer) string {
+	t.Helper()
+
+	for _, line := range strings.Split(logs.String(), "\n") {
+		var record struct {
+			Msg     string `json:"msg"`
+			Address string `json:"address"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "serving" {
+			return record.Address
+		}
+	}
+	t.Fatal("no serving line in the logs")
+	return ""
+}
+
+// The Z-014 acceptance path against a real process boundary: first boot
+// prints credentials once, the printed password opens only the rotation door,
+// rotating opens the rest, and a restart prints nothing.
+func TestServeBootstrapsAndForcesRotation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	env, stdout, logs := newServeStreams()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, env, []string{
+			"serve", "-data-dir", dir, "-server.address", "127.0.0.1:0", "-log.format", "json",
+		})
+	}()
+	waitForServing(t, logs, done)
+
+	// The credentials went to stdout, once, and never to the log stream.
+	credentials := regexp.MustCompile(`password: ([A-Za-z0-9_-]{32})`).FindStringSubmatch(stdout.String())
+	if credentials == nil {
+		t.Fatalf("stdout has no bootstrap password:\n%s", stdout.String())
+	}
+	password := credentials[1]
+	if strings.Contains(logs.String(), password) {
+		t.Fatal("the bootstrap password leaked into the log stream")
+	}
+
+	base := "http://" + servingAddress(t, logs)
+	call := func(method, path, password, body string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, base+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.SetBasicAuth("admin", password)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		read := new(strings.Builder)
+		_, _ = io.Copy(read, resp.Body)
+		return resp, read.String()
+	}
+
+	// The printed password reaches nothing but the rotation endpoint.
+	if resp, body := call(http.MethodGet, "/api/v1/auth/explain?verb=gc:run", password, ""); resp.StatusCode != http.StatusForbidden ||
+		!strings.Contains(body, "rotation-required") {
+		t.Fatalf("explain before rotation: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := call(http.MethodPost, "/api/v1/auth/password", password,
+		`{"current_password":"`+password+`","new_password":"correct horse battery"}`); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("rotation: %d %s", resp.StatusCode, body)
+	}
+	resp, body := call(http.MethodGet, "/api/v1/auth/explain?verb=gc:run", "correct horse battery", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"allowed":true`) {
+		t.Fatalf("explain after rotation: %d %s", resp.StatusCode, body)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+
+	// A restart prints no credentials: the store remembers its admin.
+	env2, stdout2, logs2 := newServeStreams()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- Run(ctx2, env2, []string{
+			"serve", "-data-dir", dir, "-server.address", "127.0.0.1:0", "-log.format", "json",
+		})
+	}()
+	waitForServing(t, logs2, done2)
+	if strings.Contains(stdout2.String(), "password:") {
+		t.Fatalf("second boot printed credentials:\n%s", stdout2.String())
+	}
+	cancel2()
+	if err := <-done2; err != nil {
+		t.Fatalf("second serve returned %v", err)
 	}
 }

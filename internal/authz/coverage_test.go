@@ -53,7 +53,7 @@ var pendingVerbs = map[authz.Verb]string{
 	authz.WebhookRead:       "E-002 webhook subscriptions",
 	authz.WebhookWrite:      "E-002 webhook subscriptions",
 	authz.SearchRead:        "E-010 cross-repo search",
-	authz.UserWrite:         "Z-014 admin bootstrap",
+	authz.UserWrite:         "user admin API (U-007's server half)",
 	authz.RoleRead:          "role/binding admin API (U-007's server half)",
 	authz.RoleWrite:         "Z-015 self-lockout prevention",
 	authz.AuditRead:         "E-009 audit log",

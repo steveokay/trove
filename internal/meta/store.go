@@ -195,6 +195,16 @@ type IdentityStore interface {
 	// read-only and the store returns ErrInvalid for them.
 	UpdateRoleVerbs(ctx context.Context, name string, verbs []string) error
 
+	// PutBuiltinRole creates or replaces a built-in role's definition. It is
+	// the seeding path (Z-014) and the only way a built-in changes: operators
+	// cannot edit them, but startup must be able to bring "admin means every
+	// verb" back to true after an upgrade -- or after a row was edited in the
+	// database, which this heals. Replacement keeps bindings: it is an
+	// upgrade, not a deletion. The role must carry the Builtin flag
+	// (ErrInvalid), and an existing custom role of the same name is an
+	// operator's and is refused (ErrConflict).
+	PutBuiltinRole(ctx context.Context, role Role) error
+
 	// DeleteRole removes a custom role and every binding that granted it.
 	// Built-in roles cannot be deleted.
 	DeleteRole(ctx context.Context, name string) error

@@ -351,6 +351,37 @@ func (s *Store) ListSubjectGroups(ctx context.Context, subject string) ([]meta.S
 // --- roles ---
 
 // CreateRole stores a role.
+// PutBuiltinRole creates or replaces a built-in role's definition (Z-014).
+// Bindings naming the role survive: replacement is an upgrade, not a deletion.
+func (s *Store) PutBuiltinRole(ctx context.Context, role meta.Role) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if !role.Builtin {
+		return meta.Invalid("role", "only a built-in role may travel the seeding path")
+	}
+	if role.Name == "" {
+		return meta.Invalid("name", "must not be empty")
+	}
+	if existing, ok := s.roles[role.Name]; ok && !existing.Builtin {
+		// A custom role of the same name is an operator's, not ours.
+		return meta.Conflict("role", role.Name)
+	}
+
+	stored := role
+	stored.Verbs = append([]string(nil), role.Verbs...)
+	sort.Strings(stored.Verbs)
+	s.roles[role.Name] = stored
+	return nil
+}
+
 func (s *Store) CreateRole(ctx context.Context, role meta.Role) error {
 	if err := ctx.Err(); err != nil {
 		return err
