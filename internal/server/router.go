@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"sync"
 )
 
 // Route is one registered endpoint and the permission it enforces.
@@ -40,6 +41,12 @@ type Router struct {
 	guard  *Guard
 	mux    *http.ServeMux
 	routes []Route
+
+	// verified caches the table check the first request triggers. Routes are
+	// registered before serving starts -- the mux requires that anyway -- so
+	// checking once is checking the table that will actually be served.
+	verified  sync.Once
+	verifyErr error
 }
 
 // NewRouter returns a router that guards every route it registers.
@@ -113,7 +120,21 @@ func (r *Router) Routes() []Route {
 	return out
 }
 
-// ServeHTTP dispatches to the registered handlers.
+// ServeHTTP dispatches to the registered handlers, or to nothing at all.
+//
+// A table that does not verify serves no requests. That makes Verify a
+// property of the router rather than a step somebody remembers: an endpoint
+// added without a permission, or made public without approval, takes the
+// deployment down loudly instead of being served quietly. The error names
+// every offending route, and it is logged on each refusal because the first
+// one may be the only thing in the log by the time anyone looks.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.verified.Do(func() { r.verifyErr = r.Verify() })
+	if r.verifyErr != nil {
+		Logger(req.Context(), nil).Error("refusing to serve an unverified route table",
+			"error", r.verifyErr)
+		ProblemErrors{}.Internal(w, req)
+		return
+	}
 	r.mux.ServeHTTP(w, req)
 }

@@ -31,7 +31,7 @@ func TestRouteTable(t *testing.T) {
 		server.Permission{Verb: authz.RepoConfigure}, noop)
 	r.HandleFunc(http.MethodGet, "/api/v1/repositories/{name}",
 		server.Permission{Verb: authz.RepoRead}, noop)
-	r.HandlePublic(http.MethodGet, "/healthz", "liveness answers before anything is configured",
+	r.HandlePublic(http.MethodGet, "/healthz", "liveness must answer before anything is configured",
 		http.HandlerFunc(noop))
 
 	routes := r.Routes()
