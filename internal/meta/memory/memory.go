@@ -49,8 +49,24 @@ type Store struct {
 	closed bool
 }
 
-// New returns an empty store.
+// New returns a store holding only the built-in anonymous subject.
+//
+// Not quite empty, because the database-backed stores are not either: their
+// migrations seed that row (ADR 0001), and every request with no credentials
+// resolves to it. A reference implementation that started without it would let
+// a caller work against a store no real deployment can have.
 func New() *Store {
+	store := newEmpty()
+	store.subjects[meta.AnonymousSubjectName] = meta.Subject{
+		ID:   meta.AnonymousSubjectID,
+		Kind: meta.Anonymous,
+		Name: meta.AnonymousSubjectName,
+	}
+	return store
+}
+
+// newEmpty returns a store with nothing in it at all.
+func newEmpty() *Store {
 	return &Store{
 		repos:     make(map[string]meta.Repository),
 		members:   make(map[string][]meta.GroupMember),

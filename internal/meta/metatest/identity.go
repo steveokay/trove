@@ -13,7 +13,7 @@ func identityTests() []suiteCase {
 		{"SubjectCRUD", testSubjectCRUD},
 		{"SubjectValidation", testSubjectValidation},
 		{"SubjectDisabling", testSubjectDisabling},
-		{"AnonymousSubjectIsUndeletable", testAnonymousSubjectIsUndeletable},
+		{"AnonymousSubjectIsSeededAndUndeletable", testAnonymousSubjectIsSeeded},
 		{"ListSubjectsPaginates", testListSubjectsPaginates},
 		{"GroupMembershipIsASet", testGroupMembershipIsASet},
 		{"GroupCRUD", testGroupCRUD},
@@ -130,30 +130,55 @@ func testSubjectDisabling(t *testing.T, s meta.Store) {
 	requireErrIs(t, s.SetSubjectDisabled(ctx(), "ghost", true), meta.ErrNotFound, "SetSubjectDisabled on a missing subject")
 }
 
-func testAnonymousSubjectIsUndeletable(t *testing.T, s meta.Store) {
-	if err := s.CreateSubject(ctx(), meta.Subject{
-		ID: "id-anon", Kind: meta.Anonymous, Name: meta.AnonymousSubjectName,
-	}); err != nil {
-		t.Fatalf("CreateSubject(anonymous): %v", err)
+// A fresh store already holds the anonymous subject. Every request with no
+// credentials resolves to it (ADR 0001), so a store without it would force a
+// special case into the one authorization path -- and the special case is what
+// the model exists to avoid.
+func testAnonymousSubjectIsSeeded(t *testing.T, s meta.Store) {
+	anonymous, err := s.GetSubject(ctx(), meta.AnonymousSubjectName)
+	if err != nil {
+		t.Fatalf("the anonymous subject is not seeded: %v", err)
+	}
+	if anonymous.Kind != meta.Anonymous {
+		t.Errorf("kind = %q, want %q", anonymous.Kind, meta.Anonymous)
+	}
+	// Bindings reference subject ids, so an operator granting anonymous access
+	// binds to this value. A generated id would differ between deployments and
+	// make the grant unportable.
+	if anonymous.ID != meta.AnonymousSubjectID {
+		t.Errorf("id = %q, want the reserved %q", anonymous.ID, meta.AnonymousSubjectID)
+	}
+	if anonymous.Disabled {
+		t.Error("the anonymous subject is seeded disabled")
 	}
 
-	// Every unauthenticated request resolves to this subject. Deleting it
-	// would turn the one authorization path into a special case.
-	err := s.DeleteSubject(ctx(), meta.AnonymousSubjectName)
+	// Seeding is not creation: the name is taken, like any other.
+	requireErrIs(t, s.CreateSubject(ctx(), meta.Subject{
+		ID: "id-other", Kind: meta.Anonymous, Name: meta.AnonymousSubjectName,
+	}), meta.ErrConflict, "CreateSubject(anonymous) on a seeded store")
+
+	// Deleting it would turn the one authorization path into a special case.
+	err = s.DeleteSubject(ctx(), meta.AnonymousSubjectName)
 	requireErrIs(t, err, meta.ErrInvalid, "DeleteSubject(anonymous)")
 
 	// It can still be disabled, which is how an operator turns anonymous
-	// access off without deleting the concept.
+	// access off wholesale without unpicking its bindings.
 	if err := s.SetSubjectDisabled(ctx(), meta.AnonymousSubjectName, true); err != nil {
 		t.Errorf("SetSubjectDisabled(anonymous): %v", err)
+	}
+	if err := s.SetSubjectDisabled(ctx(), meta.AnonymousSubjectName, false); err != nil {
+		t.Errorf("SetSubjectDisabled(anonymous, false): %v", err)
 	}
 }
 
 func testListSubjectsPaginates(t *testing.T, s meta.Store) {
-	const total = 5
-	for i := 0; i < total; i++ {
+	const created = 5
+	for i := 0; i < created; i++ {
 		mustCreateSubject(t, s, string(rune('a'+i))+"-user", meta.User)
 	}
+	// Plus the seeded anonymous subject: a listing shows what is there, and
+	// what is there always includes it.
+	const total = created + 1
 
 	var seen []string
 	cursor := ""
