@@ -456,9 +456,14 @@ regardless of what the UI rendered.
 
 **Gate:** `go test ./... -covermode=atomic -coverpkg=./...` must report ≥95.0% line
 coverage. CI fails below it. Excluded from the denominator: generated code, mocks,
-`cmd/*/main.go` wiring, and **shared test harnesses** — directories named `*test`
-(`internal/meta/metatest`, `internal/blob/blobtest`) and the top-level `test/` tree.
-Nothing else.
+`cmd/*/main.go` wiring, and the **named shared test harnesses** —
+`internal/meta/metatest`, `internal/blob/blobtest`, `internal/authz/verbtest` —
+plus the top-level `test/` tree. Nothing else.
+
+Named, not matched as `*test`: that glob also caught `internal/archtest`, which
+is an analyser with real logic rather than a contract suite, and dropped it from
+the denominator without saying so (found in Z-009, 2026-09-03). Adding a harness
+to the list is a deliberate edit to `scripts/coverage.sh` and its self-test.
 
 The harness exclusion (added 2026-09-01, F-005) exists because a contract suite is
 test code that happens to live in an importable package: its `t.Errorf` branches

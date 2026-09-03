@@ -65,6 +65,20 @@ printf 'mode: atomic
 ' "$M" >"$tmp/attest.profile"
 assert "production package with test-like name still counted" 1 "$tmp/attest.profile"
 
+# Only the named harnesses are exempt. A package whose name merely ends in
+# "test" -- internal/archtest is an analyser, not a contract suite -- stays in
+# the denominator, or the gate would quietly stop measuring production code.
+printf 'mode: atomic
+%s/internal/archtest/archtest.go:1.1,9.2 50 0
+' "$M" >"$tmp/archtest.profile"
+assert "a package ending in test that is not a harness is counted" 1 "$tmp/archtest.profile"
+
+printf 'mode: atomic
+%s/internal/a/a.go:1.1,3.2 10 1
+%s/internal/authz/verbtest/verbtest.go:1.1,9.2 80 0
+' "$M" "$M" >"$tmp/verbtest.profile"
+assert "verbtest harness excluded" 0 "$tmp/verbtest.profile"
+
 # A non-main .go file named like a command must NOT be excluded.
 printf 'mode: atomic\n%s/internal/cli/main.go:1.1,9.2 50 0\n' "$M" >"$tmp/notcmd.profile"
 assert "internal main.go still counted" 1 "$tmp/notcmd.profile"

@@ -9,7 +9,11 @@
 #   * cmd/*/main.go     process wiring
 #   * *_mock.go         generated mocks
 #   * *.gen.go          generated code
-#   * */<name>test/*    shared test harnesses (metatest, blobtest)
+#   * the named shared contract harnesses: metatest, blobtest, verbtest.
+#     Named rather than matched as */*test/*, because that glob also caught
+#     internal/archtest -- an analyser with real logic, not a harness -- and
+#     silently dropped it from the denominator. Adding a harness here is a
+#     deliberate, reviewable edit.
 #   * test/*            the top-level test tree
 #
 # Usage: scripts/coverage.sh [profile] [threshold]
@@ -46,7 +50,7 @@ read -r covered total excluded_files < <(
 			if (file ~ /\/cmd\/[^\/]+\/main\.go$/ ||
 			    file ~ /_mock\.go$/ ||
 			    file ~ /\.gen\.go$/ ||
-			    file ~ /\/[a-z0-9]+test\// ||
+			    file ~ /\/(metatest|blobtest|verbtest)\// ||
 			    file ~ /\/test\//) {
 				excluded[file] = 1
 				next
