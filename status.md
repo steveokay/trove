@@ -193,7 +193,7 @@ Detailed specs (files, test plans): `docs/plan/phase-7-events-observability.md`
 
 | ID | Task | Status | Depends on | Acceptance criteria |
 |---|---|---|---|---|
-| E-001 | In-process event bus + typed event taxonomy | todo | D-014 ✓ | All events in CLAUDE.md §8 emitted and tested |
+| E-001 | In-process event bus + typed event taxonomy | review | D-014 ✓, F-006 ✓ | `internal/event`: 16 ADR 0012 types (§8's 13 plus `group.member.skipped`, `cache.stale-served`, `blob.corrupt` — the ADR names them), each with a typed payload that makes a body disagreeing with its type unconstructable and a **round-trip** golden, so a field that encodes but never decodes fails. Bus registers handlers rather than handing out channels — a panicking channel *reader* panics where the bus cannot see it, so the required isolation test would have had nothing to assert; publish never blocks, full queues drop and count. **Outbox adds `meta.Store.WithinTx`** (an `AppendEvents` batch was rejected: no caller owns a transaction today, so it could only have delivered atomicity within itself, not ADR 0012's event-iff-committed). Migration 0006; no FK on `repo_name`, since an event outlives what it names. Wired into serve, drained before the store closes. Emission from call sites belongs to each owning task. Details → `docs/notes/phase-7.md` |
 | E-002 | Webhook subscriptions + filters | todo | E-001 | Per-repo, per-event-type |
 | E-003 | Webhook delivery: HMAC signing, retry, DLQ | todo | E-002 | At-least-once; documented idempotency key; dead-letter visible; delivery queue durable across restart |
 | E-004 | **Webhook permission scoping** | todo | E-002, Z-012 ✓ | Subscription only receives events its owning subject can read |
