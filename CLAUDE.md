@@ -457,8 +457,8 @@ regardless of what the UI rendered.
 **Gate:** `go test ./... -covermode=atomic -coverpkg=./...` must report ≥95.0% line
 coverage. CI fails below it. Excluded from the denominator: generated code, mocks,
 `cmd/*/main.go` wiring, and the **named shared test harnesses** —
-`internal/meta/metatest`, `internal/blob/blobtest`, `internal/authz/verbtest` —
-plus the top-level `test/` tree. Nothing else.
+`internal/meta/metatest`, `internal/blob/blobtest`, `internal/authz/verbtest`,
+`internal/proxy/clienttest` — plus the top-level `test/` tree. Nothing else.
 
 Named, not matched as `*test`: that glob also caught `internal/archtest`, which
 is an analyser with real logic rather than a contract suite, and dropped it from

@@ -79,6 +79,19 @@ printf 'mode: atomic
 ' "$M" "$M" >"$tmp/verbtest.profile"
 assert "verbtest harness excluded" 0 "$tmp/verbtest.profile"
 
+printf 'mode: atomic
+%s/internal/a/a.go:1.1,3.2 10 1
+%s/internal/proxy/clienttest/suite.go:1.1,9.2 80 0
+' "$M" "$M" >"$tmp/clienttest.profile"
+assert "clienttest harness excluded" 0 "$tmp/clienttest.profile"
+
+# The harness exemption is by directory, not by a name appearing anywhere in
+# the path: the client itself stays in the denominator.
+printf 'mode: atomic
+%s/internal/proxy/registryclient.go:1.1,9.2 50 0
+' "$M" >"$tmp/proxyclient.profile"
+assert "the proxy client itself is counted" 1 "$tmp/proxyclient.profile"
+
 # A non-main .go file named like a command must NOT be excluded.
 printf 'mode: atomic\n%s/internal/cli/main.go:1.1,9.2 50 0\n' "$M" >"$tmp/notcmd.profile"
 assert "internal main.go still counted" 1 "$tmp/notcmd.profile"
