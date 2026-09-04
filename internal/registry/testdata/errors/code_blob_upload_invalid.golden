@@ -1,0 +1,4 @@
+HTTP/1.1 416 Requested Range Not Satisfiable
+Content-Type: application/json
+
+{"errors":[{"code":"BLOB_UPLOAD_INVALID","message":"chunk must continue at offset 512"}]}

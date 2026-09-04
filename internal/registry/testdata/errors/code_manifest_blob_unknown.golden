@@ -1,0 +1,4 @@
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"errors":[{"code":"MANIFEST_BLOB_UNKNOWN","message":"manifest references blob sha256:0000000000000000000000000000000000000000000000000000000000000000 which is unknown to the registry"}]}

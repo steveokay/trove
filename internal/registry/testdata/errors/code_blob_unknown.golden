@@ -1,0 +1,4 @@
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"errors":[{"code":"BLOB_UNKNOWN","message":"blob unknown to registry"}]}

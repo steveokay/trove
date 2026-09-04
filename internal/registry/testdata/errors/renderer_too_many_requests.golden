@@ -1,0 +1,5 @@
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 2
+
+{"errors":[{"code":"TOOMANYREQUESTS","message":"too many requests"}]}

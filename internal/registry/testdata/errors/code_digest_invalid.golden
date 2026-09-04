@@ -1,0 +1,4 @@
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"errors":[{"code":"DIGEST_INVALID","message":"manifest payload does not match the digest reference"}]}

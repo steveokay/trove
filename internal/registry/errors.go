@@ -48,6 +48,19 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	}{Errors: []specError{{Code: code, Message: message}}})
 }
 
+// WriteSpecError writes one spec error envelope: the status, the JSON content
+// type, and the `{"errors":[{"code","message"}]}` body every OCI client
+// parses. It is the exported face of the single constructor the handlers in
+// this package already use -- it renders exactly the same bytes and adds no
+// behaviour of its own.
+//
+// It exists so that R-008's golden suite can pin each code's wire bytes from
+// outside the package, and so that a future caller elsewhere renders this
+// shape rather than hand-rolling one, which ADR 0003 forbids.
+func WriteSpecError(w http.ResponseWriter, status int, code, message string) {
+	writeError(w, status, code, message)
+}
+
 // SpecErrors renders the guard's refusals in the distribution envelope, so
 // the /v2/ tree never speaks problem+json (ADR 0015). It is handed to the
 // router through server.SplitErrors at wiring time.
