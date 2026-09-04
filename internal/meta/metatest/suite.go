@@ -744,6 +744,11 @@ func testReferrers(t *testing.T, s meta.Store) {
 	if len(all) != 2 {
 		t.Fatalf("got %d referrers, want 2", len(all))
 	}
+	// Ordered by digest: the interface promises it, because the rendered
+	// referrers index is golden-tested and must not depend on the engine.
+	if all[0].Digest > all[1].Digest {
+		t.Errorf("referrers out of digest order: %s before %s", all[0].Digest, all[1].Digest)
+	}
 
 	filtered, err := s.ListReferrers(ctx(), "repo", subject, "application/spdx+json")
 	if err != nil {

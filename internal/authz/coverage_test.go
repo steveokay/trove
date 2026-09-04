@@ -34,7 +34,6 @@ func TestEveryVerbHasBothPolarities(t *testing.T) {
 // requires deleting tests, which is the point.
 var pendingVerbs = map[authz.Verb]string{
 	authz.TagDelete:         "the DELETE manifests/<tag> wire op — blocked on a route split (R-003 notes); protected-tag gating arrives with P-001",
-	authz.ReferrerRead:      "R-005 referrers API",
 	authz.RepoCreate:        "C-016 repository admin API",
 	authz.RepoConfigure:     "C-016 repository admin API",
 	authz.RepoDelete:        "C-016 repository admin API",

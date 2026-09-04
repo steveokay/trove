@@ -83,9 +83,12 @@ type ContentStore interface {
 	ListIndexParents(ctx context.Context, repo string, child Digest) ([]Digest, error)
 
 	// ListReferrers returns manifests whose subject is the given digest,
-	// optionally filtered by artifact type. Callers must check read permission
-	// on the subject first: a referrer inherits the subject's permission
-	// (ADR 0001), and this method does not know the subject.
+	// optionally filtered by artifact type, ordered by digest -- the ordering
+	// is contract, because the rendered referrers index is golden-tested and
+	// a store-dependent order would make identical registries answer
+	// differently. Callers must check read permission on the subject first: a
+	// referrer inherits the subject's permission (ADR 0001), and this method
+	// does not know the subject.
 	ListReferrers(ctx context.Context, repo string, subject Digest, artifactType string) ([]Manifest, error)
 
 	// PutTag creates or repoints a tag. The manifest must already exist.
