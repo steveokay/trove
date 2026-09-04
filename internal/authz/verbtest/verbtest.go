@@ -108,8 +108,14 @@ func Scan(root string) (Coverage, error) {
 }
 
 func skipDir(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		// Dot-directories are not the tree being vouched for: .git holds
+		// checkouts, and .claude/worktrees holds parallel agents' working
+		// copies whose marks would count for code that has not merged.
+		return true
+	}
 	switch name {
-	case ".git", ".github", "bin", "node_modules", "testdata", "web":
+	case "bin", "node_modules", "testdata", "web":
 		return true
 	case "verbtest":
 		// This package's own tests call the marks to check that they work.
