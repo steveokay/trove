@@ -406,8 +406,14 @@ func findMuxUses(root string) ([]muxUse, int, error) {
 // not skipped -- its embed file is ours, and exempting the directory would
 // exempt whatever else lands in it.
 func skipDir(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		// Dot-directories are other checkouts, not the tree under scan:
+		// .git holds objects, and .claude/worktrees holds parallel agents'
+		// working copies, whose own router.go would read as a second mux.
+		return true
+	}
 	switch name {
-	case ".git", ".github", "node_modules", "dist", "testdata":
+	case "node_modules", "dist", "testdata":
 		return true
 	}
 	return false

@@ -33,7 +33,6 @@ import (
 // below fails the suite when a named task is done, so a surface cannot land
 // without its disclosure test landing in the same breath.
 var pendingSurfaces = map[string]string{
-	"catalog endpoint":                     "R-004",
 	"referrers listing":                    "R-005",
 	"cross-repo search":                    "E-010",
 	"webhook event delivery":               "E-004",
