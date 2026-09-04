@@ -37,15 +37,15 @@ func TestKindsRoundTripThroughTheRegistry(t *testing.T) {
 
 	// `oras attach --artifact-type application/spdx+json`, and cosign's
 	// signature, both attaching to the image by subject.
-	attach := func(artifactType, reference string, subject string, subjectSize int) string {
+	attach := func(artifactType, subject string, subjectSize int) string {
 		payload := imageManifest(
 			fmt.Sprintf(`"artifactType": %q`, artifactType),
 			fmt.Sprintf(`"subject": {"mediaType": %q, "digest": %q, "size": %d}`,
 				artifact.MediaTypeOCIManifest, subject, subjectSize))
 		return putManifest(t, s, "carol", manifestDigest(payload), artifact.MediaTypeOCIManifest, payload)
 	}
-	sbomDigest := attach(artifact.ArtifactTypeSPDX, "sbom", imageDigest, len(image))
-	signatureDigest := attach(artifact.ArtifactTypeCosignSignature, "sig", imageDigest, len(image))
+	sbomDigest := attach(artifact.ArtifactTypeSPDX, imageDigest, len(image))
+	signatureDigest := attach(artifact.ArtifactTypeCosignSignature, imageDigest, len(image))
 
 	// A multi-arch index over the image.
 	index := fmt.Sprintf(`{"schemaVersion": 2, "mediaType": %q,

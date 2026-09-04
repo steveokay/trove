@@ -80,6 +80,13 @@ func (b *Blobs) Register(r *server.Router) {
 
 	r.HandleOCI(http.MethodHead, "/blobs/{digest}", read, http.HandlerFunc(b.stat))
 	r.HandleOCI(http.MethodGet, "/blobs/{digest}", read, http.HandlerFunc(b.get))
+	// Blob deletion is the spec's optional operation, and trove declines it
+	// deliberately (see refuseDelete). The route exists so the refusal is the
+	// spec's 405 rather than the 404 an unrouted path would give: a client
+	// must be able to tell "this registry does not do that" from "that blob is
+	// not here", and the conformance suite reads exactly this distinction.
+	r.HandleOCI(http.MethodDelete, "/blobs/{digest}",
+		server.Permission{Verb: authz.ManifestDelete, Resource: resource}, http.HandlerFunc(b.refuseDelete))
 	r.HandleOCI(http.MethodPost, "/blobs/uploads/", write, http.HandlerFunc(b.start))
 	r.HandleOCI(http.MethodPatch, "/blobs/uploads/{id}", write, http.HandlerFunc(b.patch))
 	r.HandleOCI(http.MethodPut, "/blobs/uploads/{id}", write, http.HandlerFunc(b.commit))
@@ -202,6 +209,33 @@ func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Docker-Content-Digest", digest.String())
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
+}
+
+// refuseDelete answers DELETE /v2/<name>/blobs/<digest>, which trove does not
+// implement, with the spec's 405.
+//
+// The distribution spec makes blob deletion optional, and taking it would
+// contradict the safety rule the whole storage design rests on: a blob is
+// reachable from any manifest that lists it, in any repository, and a client
+// deleting one directly can leave an image that pulls a layer that is no
+// longer there. Reclamation is garbage collection's, which deletes only what
+// nothing references and prefers leaking a blob to losing one (§7, ADR 0010).
+//
+// Answering 405 rather than letting the path 404 is the point: a 404 says the
+// blob is absent, which is a different fact and a false one. The permission is
+// still checked first, so a subject who cannot see the repository learns
+// nothing from the difference.
+func (b *Blobs) refuseDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
+		return
+	}
+	if _, ok := parsedDigest(w, server.OCIValue(r, "digest")); !ok {
+		return
+	}
+	w.Header().Set("Allow", "GET, HEAD")
+	writeError(w, http.StatusMethodNotAllowed, CodeUnsupported,
+		"this registry does not delete blobs directly: unreferenced blobs are reclaimed by garbage collection, "+
+			"which cannot orphan a manifest that still lists them")
 }
 
 // get serves GET /v2/<name>/blobs/<digest>, streaming through the verifying

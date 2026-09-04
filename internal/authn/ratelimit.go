@@ -146,6 +146,31 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// Refund returns one spent attempt to key, as close to unspending it as the
+// arithmetic allows: the debt moves back by one interval, never earlier than
+// now, so a refund cannot bank credit for a key that was idle anyway.
+//
+// It is what makes the limiter throttle *guessing* rather than *use*. A wrong
+// password is a guess and stays charged; a right one is a client doing its
+// job, and charging it would cap how often a legitimate push may authenticate
+// (R-009: the conformance suite mints a token per operation and was refused
+// mid-run, which is what a large `docker push` would have hit in production).
+func (l *Limiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := l.clock()
+	b, ok := l.buckets[key]
+	if !ok {
+		return
+	}
+	if restored := b.restoredAt.Add(-l.cfg.Refill); restored.After(now) {
+		b.restoredAt = restored
+	} else {
+		b.restoredAt = now
+	}
+}
+
 // Peek reports whether an attempt would be allowed without spending anything.
 // It exists so a caller checking several dimensions can decide before
 // committing to any of them.
@@ -291,4 +316,27 @@ func (l *AttemptLimiter) Allow(a Attempt) (bool, time.Duration) {
 		_, _ = l.address.Allow(a.Address)
 	}
 	return true, 0
+}
+
+// Succeed refunds an attempt that turned out to be a real authentication.
+//
+// The limiter exists to make password guessing expensive, and a correct
+// password is not a guess. Charging one anyway sets a ceiling on how often a
+// legitimate client may authenticate -- which is a availability bug wearing a
+// security bug's clothes, and the one R-009's conformance run walked into: a
+// registry that refuses the eleventh token of a push is broken, not hardened.
+//
+// Every wrong guess is still charged, so the brute-force arithmetic is
+// unchanged. The concession is on the address dimension: an attacker who
+// already holds one valid credential can refund their own successes and so
+// guess a little longer from that address. They are an authenticated attacker
+// at that point, with a legitimate way to make the same requests, so the
+// exchange buys nothing they did not have.
+func (l *AttemptLimiter) Succeed(a Attempt) {
+	if a.Account != "" {
+		l.account.Refund(a.Account)
+	}
+	if a.Address != "" {
+		l.address.Refund(a.Address)
+	}
 }

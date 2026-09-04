@@ -100,6 +100,12 @@ func (l *PasswordLogin) Authenticate(ctx context.Context, username, password, so
 		return err
 	}
 
+	// The password was right, so the attempt was a client authenticating
+	// rather than guessing: give the budget back. Every wrong guess above
+	// returns while still charged, which is where the limiter's teeth are.
+	if l.limiter != nil {
+		l.limiter.Succeed(Attempt{Account: username, Address: source})
+	}
 	l.upgrade(ctx, cred, password)
 	return nil
 }
