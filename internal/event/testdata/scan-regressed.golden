@@ -1,0 +1,33 @@
+{
+  "id": "01K4EXAMPLE0SCANREGRESSSAA",
+  "type": "scan.regressed",
+  "repository": "team-a/api",
+  "resource": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "team-a/api",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "scanner": "trivy",
+    "database_version": "2026-09-04T06:00:00Z",
+    "previous": {
+      "critical": 0,
+      "high": 1,
+      "medium": 3,
+      "low": 8,
+      "unknown": 0,
+      "fixable": 2
+    },
+    "current": {
+      "critical": 2,
+      "high": 3,
+      "medium": 3,
+      "low": 8,
+      "unknown": 1,
+      "fixable": 5
+    },
+    "new_cves": [
+      "CVE-2026-1000",
+      "CVE-2026-1001"
+    ]
+  }
+}

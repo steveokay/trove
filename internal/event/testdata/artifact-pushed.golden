@@ -1,0 +1,17 @@
+{
+  "id": "01K4EXAMPLE0PUSHED000000AA",
+  "type": "artifact.pushed",
+  "repository": "team-a/api",
+  "resource": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "actor": "alice",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "team-a/api",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "tag": "v1.4.2",
+    "media_type": "application/vnd.oci.image.manifest.v1+json",
+    "artifact_type": "application/vnd.example.sbom+json",
+    "subject": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "size": 4711
+  }
+}

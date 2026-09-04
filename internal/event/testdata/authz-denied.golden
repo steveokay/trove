@@ -1,0 +1,13 @@
+{
+  "id": "01K4EXAMPLE0AUTHZDENIED0AA",
+  "type": "authz.denied",
+  "resource": "team-b/secret",
+  "actor": "alice",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "subject": "alice",
+    "verb": "repo:write",
+    "resource": "team-b/secret",
+    "reason": "no-binding"
+  }
+}

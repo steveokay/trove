@@ -1,0 +1,17 @@
+{
+  "id": "01K4EXAMPLE0DELETED00000AA",
+  "type": "artifact.deleted",
+  "repository": "team-a/api",
+  "resource": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "actor": "alice",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "team-a/api",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "tags": [
+      "v1.4.2",
+      "latest"
+    ],
+    "cascaded": true
+  }
+}

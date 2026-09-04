@@ -68,6 +68,15 @@ func Run(t *testing.T, f Factory) {
 		{"PullStatsEmptyBatch", testPullStatsEmptyBatch},
 		{"PullStatsValidation", testPullStatsValidation},
 		{"DeleteRepositoryRemovesContent", testDeleteRepositoryRemovesContent},
+		{"EventsAppendThenList", testEventsAppendThenList},
+		{"EventsAreOrderedByID", testEventsAreOrderedByID},
+		{"EventsPaginate", testEventsPaginate},
+		{"EventsAreLostWhenTheirTransactionFails", testEventsAreLostWhenTheirTransactionFails},
+		{"EventValidation", testEventValidation},
+		{"EventIDsAreUnique", testEventIDsAreUnique},
+		{"EventsFilterByVisibility", testEventsFilterByVisibility},
+		{"EventsOutliveTheirRepository", testEventsOutliveTheirRepository},
+		{"EventTxIsScopedToItsCall", testEventTxIsScopedToItsCall},
 		{"ContextCancellation", testContextCancellation},
 		{"CloseIsIdempotent", testCloseIsIdempotent},
 	}
@@ -1691,6 +1700,317 @@ func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 	}
 }
 
+// --- events (the outbox, ADR 0012) ---
+
+// event builds a repository event with the given id, so a case can say what it
+// means about ordering and visibility without repeating the whole struct.
+func event(id, repo string) meta.Event {
+	return meta.Event{
+		ID:         id,
+		Type:       "artifact.pushed",
+		Repository: repo,
+		Resource:   "sha256:" + id,
+		Actor:      "alice",
+		Payload:    []byte(`{"digest":"sha256:` + id + `"}`),
+		At:         testTime,
+	}
+}
+
+// mustAppendEvents writes a batch through one transaction.
+func mustAppendEvents(t *testing.T, s meta.Store, events ...meta.Event) {
+	t.Helper()
+
+	err := s.WithinTx(ctx(), func(tx meta.Tx) error {
+		for _, e := range events {
+			if err := tx.AppendEvent(ctx(), e); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithinTx appending %d events: %v", len(events), err)
+	}
+}
+
+// listEventIDs pages through the whole outbox under a visibility and returns the
+// ids in the order the store gave them.
+func listEventIDs(t *testing.T, s meta.Store, vis meta.Visibility, limit int) []string {
+	t.Helper()
+
+	var (
+		ids    []string
+		cursor string
+	)
+	for pages := 0; ; pages++ {
+		if pages > 32 {
+			t.Fatal("event pagination did not terminate")
+		}
+		page, err := s.ListEvents(ctx(), meta.ListOptions{Visibility: vis, Limit: limit, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		for _, e := range page.Events {
+			ids = append(ids, e.ID)
+		}
+		if page.NextCursor == "" {
+			return ids
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// An appended event comes back whole. The payload in particular must return
+// byte for byte: it is the webhook wire body, and a store that re-encoded it
+// would invalidate a signature computed over what the emitter rendered.
+func testEventsAppendThenList(t *testing.T, s meta.Store) {
+	mustAppendEvents(t, s, event("01a", "team-a/api"))
+
+	page, err := s.ListEvents(ctx(), meta.ListOptions{Visibility: meta.Unrestricted()})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(page.Events))
+	}
+
+	got, want := page.Events[0], event("01a", "team-a/api")
+	switch {
+	case got.ID != want.ID:
+		t.Errorf("id = %q, want %q", got.ID, want.ID)
+	case got.Type != want.Type:
+		t.Errorf("type = %q, want %q", got.Type, want.Type)
+	case got.Repository != want.Repository:
+		t.Errorf("repository = %q, want %q", got.Repository, want.Repository)
+	case got.Resource != want.Resource:
+		t.Errorf("resource = %q, want %q", got.Resource, want.Resource)
+	case got.Actor != want.Actor:
+		t.Errorf("actor = %q, want %q", got.Actor, want.Actor)
+	case string(got.Payload) != string(want.Payload):
+		t.Errorf("payload = %s, want %s", got.Payload, want.Payload)
+	case !got.At.Equal(want.At):
+		t.Errorf("at = %s, want %s", got.At, want.At)
+	}
+
+	// A system event has no repository, and the empty string is how the store
+	// reports the NULL it holds.
+	system := event("01b", "")
+	system.Type = "gc.completed"
+	mustAppendEvents(t, s, system)
+
+	page, err = s.ListEvents(ctx(), meta.ListOptions{Visibility: meta.Unrestricted()})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(page.Events) != 2 || page.Events[1].Repository != "" {
+		t.Errorf("system event = %+v, want an empty repository", page.Events)
+	}
+}
+
+// The id is a ULID, so ordering by it is chronological ordering and a cursor
+// can be the last id of a page. Appending out of order must not change that:
+// two writers that raced are still read back in id order.
+func testEventsAreOrderedByID(t *testing.T, s meta.Store) {
+	mustAppendEvents(t, s, event("01c", "team-a/api"))
+	mustAppendEvents(t, s, event("01a", "team-a/api"))
+	mustAppendEvents(t, s, event("01b", "team-a/api"))
+
+	got := listEventIDs(t, s, meta.Unrestricted(), 0)
+	want := []string{"01a", "01b", "01c"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ids = %v, want %v", got, want)
+	}
+}
+
+// Pagination is keyset on the id, so a page boundary is stable under writes
+// and the count never leaks anything the filter removed (ADR 0015).
+func testEventsPaginate(t *testing.T, s meta.Store) {
+	var events []meta.Event
+	for i := 0; i < 7; i++ {
+		events = append(events, event(fmt.Sprintf("01%02d", i), "team-a/api"))
+	}
+	mustAppendEvents(t, s, events...)
+
+	got := listEventIDs(t, s, meta.Unrestricted(), 3)
+	if len(got) != 7 {
+		t.Fatalf("paged %d events, want 7: %v", len(got), got)
+	}
+	for i, id := range got {
+		if want := fmt.Sprintf("01%02d", i); id != want {
+			t.Errorf("page position %d = %q, want %q", i, id, want)
+		}
+	}
+}
+
+// The crash test ADR 0012 requires: an event row exists if and only if the
+// transaction that produced it committed. A transaction that fails leaves
+// nothing behind, including the events appended before the failure -- otherwise
+// at-least-once delivery would announce changes that never happened.
+func testEventsAreLostWhenTheirTransactionFails(t *testing.T, s meta.Store) {
+	mustAppendEvents(t, s, event("01a", "team-a/api"))
+
+	boom := errors.New("the change this event announces failed")
+	err := s.WithinTx(ctx(), func(tx meta.Tx) error {
+		if err := tx.AppendEvent(ctx(), event("01b", "team-a/api")); err != nil {
+			return err
+		}
+		if err := tx.AppendEvent(ctx(), event("01c", "team-a/api")); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("WithinTx = %v, want the function's own error", err)
+	}
+
+	got := listEventIDs(t, s, meta.Unrestricted(), 0)
+	if len(got) != 1 || got[0] != "01a" {
+		t.Errorf("ids = %v, want only the committed event", got)
+	}
+
+	// The store is still usable afterwards: a rolled-back transaction is a
+	// normal outcome, not a poisoned handle.
+	mustAppendEvents(t, s, event("01d", "team-a/api"))
+	if got := listEventIDs(t, s, meta.Unrestricted(), 0); len(got) != 2 {
+		t.Errorf("ids after a retry = %v, want two events", got)
+	}
+}
+
+// An event with no id cannot be deduplicated, one with no type cannot be
+// routed, and one with no timestamp cannot be ordered. All three are refused
+// rather than defaulted, and the refusal rolls the transaction back whole.
+func testEventValidation(t *testing.T, s meta.Store) {
+	noID := event("01a", "team-a/api")
+	noID.ID = ""
+	noType := event("01b", "team-a/api")
+	noType.Type = ""
+	noTime := event("01c", "team-a/api")
+	noTime.At = time.Time{}
+
+	for _, tc := range []struct {
+		name  string
+		event meta.Event
+	}{
+		{"no id", noID},
+		{"no type", noType},
+		{"no timestamp", noTime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.WithinTx(ctx(), func(tx meta.Tx) error {
+				// A valid event first, so the case also proves the batch is
+				// all-or-nothing rather than only that the bad one failed.
+				if err := tx.AppendEvent(ctx(), event("01z", "team-a/api")); err != nil {
+					return err
+				}
+				return tx.AppendEvent(ctx(), tc.event)
+			})
+			requireErrIs(t, err, meta.ErrInvalid, "AppendEvent with "+tc.name)
+		})
+	}
+
+	if got := listEventIDs(t, s, meta.Unrestricted(), 0); len(got) != 0 {
+		t.Errorf("ids = %v, want nothing written", got)
+	}
+}
+
+// The id is the idempotency key a receiver deduplicates on (ADR 0012), so two
+// events may not share one: a repeat is a conflict, whether the first is
+// already stored or merely queued in the same transaction.
+func testEventIDsAreUnique(t *testing.T, s meta.Store) {
+	mustAppendEvents(t, s, event("01a", "team-a/api"))
+
+	err := s.WithinTx(ctx(), func(tx meta.Tx) error {
+		return tx.AppendEvent(ctx(), event("01a", "team-a/api"))
+	})
+	requireErrIs(t, err, meta.ErrConflict, "re-appending a stored id")
+
+	err = s.WithinTx(ctx(), func(tx meta.Tx) error {
+		if err := tx.AppendEvent(ctx(), event("01b", "team-a/api")); err != nil {
+			return err
+		}
+		return tx.AppendEvent(ctx(), event("01b", "team-a/api"))
+	})
+	requireErrIs(t, err, meta.ErrConflict, "re-appending an id from the same transaction")
+
+	if got := listEventIDs(t, s, meta.Unrestricted(), 0); len(got) != 1 {
+		t.Errorf("ids = %v, want only the first event", got)
+	}
+}
+
+// An event names a repository, so a subject that cannot read that repository
+// must not see the event -- in a page, in a count, or in a cursor (ADR 0003).
+// System events carry no repository to check, so only an unrestricted reader
+// sees them; the verb they really require is per-type and belongs to the
+// delivery worker that knows the subscriber (E-004).
+func testEventsFilterByVisibility(t *testing.T, s meta.Store) {
+	mustAppendEvents(t, s,
+		event("01a", "team-a/api"),
+		event("01b", "team-b/api"),
+		event("01c", "team-a/web"),
+		meta.Event{ID: "01d", Type: "gc.completed", At: testTime},
+	)
+
+	for _, tc := range []struct {
+		name string
+		vis  meta.Visibility
+		want []string
+	}{
+		{"unrestricted sees everything, system events included",
+			meta.Unrestricted(), []string{"01a", "01b", "01c", "01d"}},
+		{"a prefix scope sees its own repositories only",
+			meta.VisibleTo(meta.ScopeFilter{Prefix: "team-a/"}), []string{"01a", "01c"}},
+		{"an exact scope sees one repository",
+			meta.VisibleTo(meta.ScopeFilter{Exact: "team-b/api"}), []string{"01b"}},
+		{"no bindings sees nothing", meta.VisibleTo(), nil},
+		// A subject scoped to every repository still holds a binding rather
+		// than an internal view, so it does not get the system events either.
+		{"a wildcard scope still sees no system event",
+			meta.VisibleTo(meta.ScopeFilter{All: true}), []string{"01a", "01b", "01c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := listEventIDs(t, s, tc.vis, 2)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("ids = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An event is an observation, not a reference. `artifact.deleted` for a
+// repository that was then deleted must outlive it, or the log would erase
+// exactly the records an operator goes looking for afterwards.
+func testEventsOutliveTheirRepository(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "doomed", meta.Hosted)
+	mustAppendEvents(t, s, event("01a", "doomed/api"), event("01b", "doomed"))
+
+	if err := s.DeleteRepository(ctx(), "doomed"); err != nil {
+		t.Fatalf("DeleteRepository: %v", err)
+	}
+	if got := listEventIDs(t, s, meta.Unrestricted(), 0); len(got) != 2 {
+		t.Errorf("ids = %v, want both events to survive the repository", got)
+	}
+}
+
+// A Tx is valid only for the call it was handed to. Retaining one is a caller
+// bug, and every implementation refuses the write rather than letting it land
+// through a transaction that has already been decided.
+func testEventTxIsScopedToItsCall(t *testing.T, s meta.Store) {
+	var escaped meta.Tx
+	if err := s.WithinTx(ctx(), func(tx meta.Tx) error {
+		escaped = tx
+		return nil
+	}); err != nil {
+		t.Fatalf("WithinTx: %v", err)
+	}
+
+	if err := escaped.AppendEvent(ctx(), event("01a", "team-a/api")); err == nil {
+		t.Error("a retained Tx accepted a write after its transaction finished")
+	}
+	if got := listEventIDs(t, s, meta.Unrestricted(), 0); len(got) != 0 {
+		t.Errorf("ids = %v, want nothing written", got)
+	}
+}
+
 // Every method must observe context cancellation. A store that ignores it
 // keeps working after its caller has given up, which is how a shutdown hangs
 // and how a cancelled request still mutates state. The table below is
@@ -1778,6 +2098,21 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 			})
 		}},
 		{"GetPullStats", func() error { _, err := s.GetPullStats(ctx, "repo", "t"); return err }},
+
+		// The function appends a valid event, so the failure the caller sees is
+		// the store's -- a begin, a statement, or the commit -- rather than one
+		// this table invented.
+		{"WithinTx", func() error {
+			return s.WithinTx(ctx, func(tx meta.Tx) error {
+				return tx.AppendEvent(ctx, meta.Event{
+					ID: "01a", Type: "artifact.pushed", Repository: "repo", At: testTime,
+				})
+			})
+		}},
+		{"ListEvents", func() error {
+			_, err := s.ListEvents(ctx, meta.ListOptions{Visibility: meta.Unrestricted()})
+			return err
+		}},
 
 		{"CreateSubject", func() error {
 			return s.CreateSubject(ctx, meta.Subject{ID: "s", Kind: meta.User, Name: "s"})

@@ -1,0 +1,15 @@
+{
+  "id": "01K4EXAMPLE0CACHESTALE00AA",
+  "type": "cache.stale-served",
+  "repository": "dockerhub/library/nginx",
+  "resource": "1.27",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "dockerhub/library/nginx",
+    "upstream": "dockerhub",
+    "reference": "1.27",
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "stale_seconds": 3600,
+    "reason": "unreachable"
+  }
+}

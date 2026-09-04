@@ -1,0 +1,21 @@
+{
+  "id": "01K4EXAMPLE0ROLECHANGED0AA",
+  "type": "role.changed",
+  "resource": "publisher",
+  "actor": "admin",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "change": "updated",
+    "role": "publisher",
+    "binding": "01K4BINDING00000000000000A",
+    "principal": "team-a",
+    "scope": "team-a/*",
+    "previous_verbs": [
+      "repo:read"
+    ],
+    "verbs": [
+      "repo:read",
+      "repo:write"
+    ]
+  }
+}

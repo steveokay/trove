@@ -1,0 +1,14 @@
+{
+  "id": "01K4EXAMPLE0PULLED000000AA",
+  "type": "artifact.pulled",
+  "repository": "team-a/api",
+  "resource": "v1.4.2",
+  "actor": "robot-ci",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "team-a/api",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "reference": "v1.4.2",
+    "media_type": "application/vnd.oci.image.manifest.v1+json"
+  }
+}

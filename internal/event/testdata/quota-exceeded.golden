@@ -1,0 +1,15 @@
+{
+  "id": "01K4EXAMPLE0QUOTAEXCEED0AA",
+  "type": "quota.exceeded",
+  "repository": "team-a",
+  "resource": "team-a",
+  "actor": "robot-ci",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "scope": "repo",
+    "key": "team-a",
+    "used_bytes": 10737418240,
+    "hard_bytes": 10737418240,
+    "requested_bytes": 4194304
+  }
+}

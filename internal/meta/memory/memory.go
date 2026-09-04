@@ -57,6 +57,12 @@ type Store struct {
 	// and can be written for content that never existed.
 	pullStats map[pullKey]meta.PullStats
 
+	// Events are keyed by id, which is a ULID: sorting the keys is sorting
+	// them chronologically, the same ordering the SQL engines get from the
+	// primary key. They hold no reference to a repository row, so an event
+	// outlives the repository it names (ADR 0012).
+	events map[string]meta.Event
+
 	// Identity is keyed by name, the handle operators use; ids are the
 	// stable reference bindings point at.
 	subjects      map[string]meta.Subject
@@ -102,6 +108,7 @@ func newEmpty() *Store {
 		blobs:     make(map[meta.Digest]meta.Blob),
 		uploads:   make(map[string]meta.UploadSession),
 		pullStats: make(map[pullKey]meta.PullStats),
+		events:    make(map[string]meta.Event),
 
 		subjects:      make(map[string]meta.Subject),
 		subjectGroups: make(map[string]meta.SubjectGroup),

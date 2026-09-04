@@ -16,6 +16,7 @@ import (
 	"github.com/steveokay/trove/internal/blob/fs"
 	"github.com/steveokay/trove/internal/blob/s3"
 	"github.com/steveokay/trove/internal/config"
+	"github.com/steveokay/trove/internal/event"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/postgres"
 	"github.com/steveokay/trove/internal/meta/sqlite"
@@ -91,6 +92,25 @@ func runServe(ctx context.Context, env Env, args []string) error {
 		return fmt.Errorf("open blob storage: %w", err)
 	}
 
+	// The event bus and its outbox (E-001). The bus fans out in process; the
+	// outbox subscriber is what makes an event durable, and it writes inside
+	// the transaction that produced the event, so a row exists exactly when
+	// the change that caused it committed (ADR 0012).
+	bus := event.New(event.Options{Log: log})
+	outbox, err := event.NewOutbox(event.OutboxOptions{
+		Store:        store,
+		PersistPulls: cfg.Events.PersistPulls,
+		Log:          log,
+	})
+	if err != nil {
+		return fmt.Errorf("build the event outbox: %w", err)
+	}
+	unsubscribe, err := bus.Subscribe(outbox.Subscription())
+	if err != nil {
+		return fmt.Errorf("subscribe the event outbox: %w", err)
+	}
+	defer unsubscribe()
+
 	// The interim reaper loop (R-011): same store values the handlers got, so
 	// it cannot be pointed at a cache root (ADR 0009). Hourly is 1/24 of the
 	// default TTL; P-006's scheduler replaces the loop, keeping ReapOnce.
@@ -124,6 +144,12 @@ func runServe(ctx context.Context, env Env, args []string) error {
 	defer cancelFlush()
 	if cerr := pulls.Close(flushCtx); cerr != nil {
 		log.Error("flushing pull statistics", "error", cerr)
+	}
+	// Drain the bus before the deferred store.Close: the outbox writes what it
+	// has accepted, and a drain into a closed store would lose exactly the
+	// events a shutdown is most likely to be asked about.
+	if cerr := bus.Close(flushCtx); cerr != nil {
+		log.Error("draining the event bus", "error", cerr)
 	}
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)

@@ -174,6 +174,61 @@ type PullStats struct {
 	Count        int64
 }
 
+// Event is one durable record in the outbox: something that happened, what it
+// happened to, and who caused it (ADR 0012). A row exists if and only if the
+// transaction that produced it committed, which is what makes at-least-once
+// delivery honest rather than aspirational -- see WithinTx.
+//
+// The store deliberately does not know the event vocabulary. The closed
+// taxonomy is internal/event's, and holding it here would mean a migration
+// every time a type was added and two places that could disagree about what a
+// type is called.
+type Event struct {
+	// ID is a ULID. It orders events chronologically under plain byte
+	// comparison, which is what lets a cursor be the last id seen, and it is
+	// the idempotency key a webhook receiver deduplicates on (ADR 0012).
+	ID string
+
+	// Type names what happened, from internal/event's closed set.
+	Type string
+
+	// Repository is the repository the event concerns. It is empty for a
+	// system event -- a garbage-collection run, a role change -- and stored as
+	// NULL, which is the form ListEvents filters on.
+	//
+	// There is deliberately no foreign key. An event is an observation, not a
+	// reference: `artifact.deleted` for a repository that was then deleted
+	// must survive it, or the log would erase exactly the records an operator
+	// asks for afterwards. This is the same reasoning pull statistics carry.
+	Repository string
+
+	// Resource is the digest, tag, or subject name the event names, as
+	// applicable. Empty when the event is about the repository itself.
+	Resource string
+
+	// Actor is the subject that caused the event. Empty means the process did
+	// -- a scheduled sweep, a cache fill -- rather than a request.
+	Actor string
+
+	// Payload is the type-specific body, byte for byte as the emitter
+	// rendered it. It is stored opaquely and returned unchanged because it is
+	// the webhook wire format: re-encoding it here would change a body that
+	// has already been signed, and would silently reorder a contract that is
+	// golden-tested upstream.
+	Payload json.RawMessage
+
+	// At is when it happened. The caller supplies it: no store calls
+	// time.Now (§7).
+	At time.Time
+}
+
+// EventPage is one page of events, oldest first. NextCursor is empty on the
+// last page.
+type EventPage struct {
+	Events     []Event
+	NextCursor string
+}
+
 // ScopeFilter matches repository names for permission-filtered queries. It is
 // the compiled form of a binding scope (ADR 0001): authz produces these plain
 // values, so the authorization engine never imports a storage package and the

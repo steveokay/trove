@@ -22,9 +22,67 @@ type Store interface {
 	ContentStore
 	IdentityStore
 	CredentialStore
+	EventStore
 
 	// Close releases the store's resources. It is safe to call twice.
 	Close() error
+}
+
+// EventStore is the durable half of the event system: the outbox that ADR 0012
+// builds at-least-once webhook delivery on.
+type EventStore interface {
+	// WithinTx runs fn inside one transaction and commits it only if fn
+	// returns nil. Everything fn wrote through tx is discarded otherwise, and
+	// fn's error is returned unwrapped so the caller can still assert on it
+	// with errors.Is.
+	//
+	// It exists for one rule: an event row must exist if and only if the
+	// change that produced it committed (ADR 0012). A caller that appends its
+	// event *after* its state change has a window in which a crash leaves a
+	// change nobody was told about, and a caller that appends before has a
+	// window in which it announces a change that never happened. Neither is
+	// recoverable, because nothing downstream can tell the two apart.
+	//
+	// Tx is one method wide today, which is honest about what has a second
+	// writer: events are the only rows that must join somebody else's
+	// transaction, and every other write already owns its own. When a state
+	// change needs to commit atomically with its event, that method moves onto
+	// Tx as part of the task that needs it -- an additive change, since Tx is
+	// an interface and callers name only what they use.
+	//
+	// fn may be called with a transaction that is already doomed if the
+	// context is cancelled mid-way; the commit then fails and the error
+	// surfaces. Implementations must not swallow it.
+	WithinTx(ctx context.Context, fn func(tx Tx) error) error
+
+	// ListEvents returns a permission-filtered page of events, oldest first,
+	// paginated by the same keyset cursor every listing uses (ADR 0015). The
+	// cursor is the last id of the previous page, which works because a ULID
+	// sorts chronologically.
+	//
+	// The visibility applies to the event's repository, inside the query
+	// (ADR 0003): an event naming a repository the subject cannot read must
+	// not appear in a page, a count, or a cursor. System events -- those with
+	// no repository -- are returned only to an unrestricted view, because
+	// there is no repository to check them against. The verb a system event
+	// really requires is per-type (an `authz.denied` event needs `audit:read`)
+	// and belongs to the delivery worker that knows the subscription's owner
+	// (E-004), not to a query that knows only names.
+	ListEvents(ctx context.Context, opts ListOptions) (EventPage, error)
+}
+
+// Tx is the write surface available inside WithinTx. It is deliberately narrow:
+// see WithinTx for why, and for how it grows.
+//
+// A Tx is valid only for the duration of the call it was handed to. Retaining
+// one past the return of fn is a caller bug; implementations are free to fail
+// such a call rather than write through a committed transaction.
+type Tx interface {
+	// AppendEvent records one event. The ID and Type must be set and the
+	// timestamp must not be zero (ErrInvalid); an ID that has been used
+	// before is ErrConflict, because the ID is the idempotency key and two
+	// events sharing one would be indistinguishable to a receiver.
+	AppendEvent(ctx context.Context, event Event) error
 }
 
 // RepositoryStore manages repository entities and group membership.

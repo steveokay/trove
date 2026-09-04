@@ -1,0 +1,14 @@
+{
+  "id": "01K4EXAMPLE0GCCOMPLETED0AA",
+  "type": "gc.completed",
+  "resource": "01K4GCRUN000000000000000A",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "run_id": "01K4GCRUN000000000000000A",
+    "manifests_scanned": 1842,
+    "blobs_deleted": 37,
+    "bytes_reclaimed": 912457728,
+    "duration_seconds": 94,
+    "resumed": true
+  }
+}

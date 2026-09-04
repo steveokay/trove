@@ -1,0 +1,14 @@
+{
+  "id": "01K4EXAMPLE0CACHEFILL000AA",
+  "type": "cache.filled",
+  "repository": "dockerhub/library/nginx",
+  "resource": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "dockerhub/library/nginx",
+    "upstream": "dockerhub",
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "reference": "1.27",
+    "size": 58720256
+  }
+}

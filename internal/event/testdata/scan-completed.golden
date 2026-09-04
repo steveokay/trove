@@ -1,0 +1,21 @@
+{
+  "id": "01K4EXAMPLE0SCANDONE0000AA",
+  "type": "scan.completed",
+  "repository": "team-a/api",
+  "resource": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "repository": "team-a/api",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "scanner": "trivy",
+    "database_version": "2026-09-03T06:00:00Z",
+    "findings": {
+      "critical": 1,
+      "high": 4,
+      "medium": 12,
+      "low": 30,
+      "unknown": 2,
+      "fixable": 9
+    }
+  }
+}

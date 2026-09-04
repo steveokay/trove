@@ -1,0 +1,14 @@
+{
+  "id": "01K4EXAMPLE0QUOTAWARNED0AA",
+  "type": "quota.warned",
+  "repository": "team-a",
+  "resource": "team-a",
+  "at": "2026-09-04T09:30:15Z",
+  "payload": {
+    "scope": "repo",
+    "key": "team-a",
+    "used_bytes": 8589934592,
+    "soft_bytes": 8589934592,
+    "hard_bytes": 10737418240
+  }
+}
