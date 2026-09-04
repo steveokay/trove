@@ -119,7 +119,7 @@ Detailed specs (files, test plans): `docs/plan/phase-3-registry-core.md`
 | R-009 | OCI conformance suite in CI | todo | R-001..R-008 | Green, required for merge; pull-side conformance also run against a group endpoint |
 | R-010 | Pull statistics: last-pulled + counts | todo | R-002 | Recorded off the hot path; feeds retention rules |
 | R-011 | Stale upload-session reaping | done | R-001 ✓ | `internal/registry/upload_reaper.go` + `registry.upload_session_ttl` (default 24h) + serve's interim hourly loop (P-006 replaces the loop, keeps `ReapOnce`). Staging cancelled before the row so every crash window self-heals; activity refreshes the clock so active uploads are structurally unreachable; committed blobs untouched by construction and by test; per-session failures logged, joined, and never stop the sweep. CI green (run 33882812060). Details → `docs/notes/phase-3.md` |
-| R-012 | Push-latency benchmark | todo | R-001, R-002 | Baseline recorded; regression check in CI; push latency unaffected by scan backlog (with S-003) |
+| R-012 | Push-latency benchmark | review | R-001 ✓, R-002 ✓ | Four benchmarks through the real router (`internal/registry/bench_test.go`) + `scripts/bench-check.sh` (39-assertion self-test) + a parallel CI `bench` job. Best-of-N against a committed baseline with 20% tolerance; the baseline ships absent by design — the first CI run records it as an artifact, the operator commits it, then the gate enforces. Scan-backlog half waits on S-003. Details → `docs/notes/phase-3.md` |
 
 ---
 

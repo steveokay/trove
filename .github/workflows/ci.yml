@@ -72,6 +72,31 @@ jobs:
           name: coverage
           path: coverage.out
 
+  bench:
+    name: Push latency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify the benchmark gate script
+        run: bash scripts/bench-check-selftest.sh
+      # Enforces when scripts/bench-baseline.txt exists; records and passes
+      # when it does not, or when it has no entry for a benchmark. Baselines
+      # are hardware-specific, so the first numbers come from this job rather
+      # than from anyone's workstation: download the bench-baseline-candidate
+      # artifact and commit its file as scripts/bench-baseline.txt.
+      - name: Compare push latency against the baseline
+        run: bash scripts/bench-check.sh scripts/bench-baseline.txt bench-candidate.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-baseline-candidate
+          path: bench-candidate.txt
+          if-no-files-found: warn
+
   build:
     name: Build
     runs-on: ubuntu-latest

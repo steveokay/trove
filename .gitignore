@@ -7,3 +7,4 @@
 coverage.out
 web/dist/
 web/node_modules/
+bench-candidate.txt
