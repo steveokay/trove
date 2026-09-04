@@ -237,7 +237,7 @@ func (m *Manifests) verifyReferences(w http.ResponseWriter, r *http.Request, nam
 		}
 	}
 	for _, child := range parsed.Children {
-		_, err := m.Meta.GetManifest(r.Context(), name, meta.Digest(child.Digest))
+		record, err := m.Meta.GetManifest(r.Context(), name, meta.Digest(child.Digest))
 		switch {
 		case errors.Is(err, meta.ErrNotFound):
 			writeError(w, http.StatusNotFound, CodeManifestBlobUnknown,
@@ -246,6 +246,12 @@ func (m *Manifests) verifyReferences(w http.ResponseWriter, r *http.Request, nam
 		case err != nil:
 			server.Logger(r.Context(), m.Log).Error("read child manifest", "digest", child.Digest, "error", err)
 			writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
+			return nil, false
+		case record.Size != child.Size:
+			// The same rule blob descriptors get: a size that lies breaks the
+			// clients that trust it (R-006 closed the gap for children).
+			writeError(w, http.StatusBadRequest, CodeManifestInvalid,
+				fmt.Sprintf("descriptor for %s states size %d but the manifest is %d bytes", child.Digest, child.Size, record.Size))
 			return nil, false
 		}
 		refs = append(refs, meta.ManifestRef{Child: meta.Digest(child.Digest), Kind: meta.RefChild})
