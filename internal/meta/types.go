@@ -44,6 +44,28 @@ type Repository struct {
 	UpdatedAt     time.Time
 }
 
+// ConfigRevision is one superseded repository configuration: the document that
+// was stored at Version, the actor who replaced it, and when.
+//
+// Only replaced revisions are recorded. The live configuration is on the
+// Repository row, so a repository's whole lineage is its history followed by
+// its current row -- which is why creating one writes no revision, and why
+// there is always exactly one more version than there are revisions.
+type ConfigRevision struct {
+	// Repository is the entity the revision belonged to.
+	Repository string
+	// Version is the config_version this document was stored at, before the
+	// update that superseded it.
+	Version int64
+	// Config is the superseded document, byte for byte as it was stored.
+	Config json.RawMessage
+	// Actor is the subject that replaced it. Empty means the change came from
+	// inside the process rather than from a request (ADR 0005).
+	Actor string
+	// At is when the replacement happened.
+	At time.Time
+}
+
 // GroupMember is one entry in a group's ordered member list. Position is
 // explicit because group resolution is first-match-wins and order must never
 // be implicit (ADR 0005).

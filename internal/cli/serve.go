@@ -163,6 +163,7 @@ func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.Passw
 	(&server.V2Root{
 		Credentials: credentials, Subjects: store, Challenge: challenge, Log: log,
 	}).Register(router)
+	(&server.Repositories{Store: store, Bindings: store, Log: log}).Register(router)
 	(&registry.Blobs{Store: hosted, Meta: store, Bindings: store, Log: log}).Register(router)
 	(&registry.Manifests{Meta: store, MaxBytes: maxManifestBytes, Pulls: pulls, Log: log}).Register(router)
 	(&registry.Tags{Meta: store, Bindings: store, Log: log}).Register(router)

@@ -38,6 +38,9 @@ func Run(t *testing.T, f Factory) {
 		{"RepositoryValidation", testRepositoryValidation},
 		{"RepositoryOptimisticConcurrency", testRepositoryOptimisticConcurrency},
 		{"RepositoryConfigIsCopied", testRepositoryConfigIsCopied},
+		{"ConfigHistoryRecordsTheSupersededRevision", testConfigHistoryRecordsTheSupersededRevision},
+		{"ConfigHistoryAccumulatesInVersionOrder", testConfigHistoryAccumulatesInVersionOrder},
+		{"ConfigHistoryDiesWithTheRepository", testConfigHistoryDiesWithTheRepository},
 		{"ListRepositoriesFiltersByVisibility", testListRepositoriesFiltersByVisibility},
 		{"ListRepositoriesPaginates", testListRepositoriesPaginates},
 		{"ListRepositoriesPaginatesUnderFiltering", testListRepositoriesPaginatesUnderFiltering},
@@ -87,6 +90,10 @@ func Run(t *testing.T, f Factory) {
 // --- helpers ---
 
 var testTime = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// updateTime is when a reconfiguration happens: distinct from testTime so a
+// store that recorded the creation time instead of the caller's is visible.
+var updateTime = testTime.Add(24 * time.Hour)
 
 func ctx() context.Context { return context.Background() }
 
@@ -223,7 +230,7 @@ func testRepositoryValidation(t *testing.T, s meta.Store) {
 func testRepositoryOptimisticConcurrency(t *testing.T, s meta.Store) {
 	mustCreateRepo(t, s, "cfg", meta.Proxy)
 
-	updated, err := s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"15m"}`), 1)
+	updated, err := s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"15m"}`), 1, "alice", updateTime)
 	if err != nil {
 		t.Fatalf("UpdateRepositoryConfig: %v", err)
 	}
@@ -233,10 +240,16 @@ func testRepositoryOptimisticConcurrency(t *testing.T, s meta.Store) {
 	if string(updated.Config) != `{"ttl":"15m"}` {
 		t.Errorf("Config = %s, want the new value", updated.Config)
 	}
+	// The row's UpdatedAt is the time the caller supplied: a repository whose
+	// configuration changed at a time nothing recorded would make the field a
+	// lie, and no store reads a clock of its own (§7).
+	if !updated.UpdatedAt.Equal(updateTime) {
+		t.Errorf("UpdatedAt = %v, want the update's time %v", updated.UpdatedAt, updateTime)
+	}
 
 	// A second writer holding the old version must lose, not silently
 	// overwrite the first writer's change.
-	_, err = s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"1h"}`), 1)
+	_, err = s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"1h"}`), 1, "bob", updateTime)
 	requireErrIs(t, err, meta.ErrStale, "UpdateRepositoryConfig with a stale version")
 
 	current, err := s.GetRepository(ctx(), "cfg")
@@ -247,8 +260,150 @@ func testRepositoryOptimisticConcurrency(t *testing.T, s meta.Store) {
 		t.Errorf("Config = %s, want the stale write to have been rejected", current.Config)
 	}
 
-	_, err = s.UpdateRepositoryConfig(ctx(), "missing", []byte(`{}`), 1)
+	_, err = s.UpdateRepositoryConfig(ctx(), "missing", []byte(`{}`), 1, "alice", updateTime)
 	requireErrIs(t, err, meta.ErrNotFound, "UpdateRepositoryConfig on a missing repository")
+}
+
+// An update records the revision it *replaced*, not the one it wrote. Getting
+// this backwards would be invisible in a single-update test and would make the
+// whole lineage off by one: the live row already holds the new document, so a
+// history that repeated it would say nothing and lose the old one.
+func testConfigHistoryRecordsTheSupersededRevision(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "cfg", meta.Proxy)
+
+	// Nothing has been superseded yet. Creation writes no revision: the live
+	// row is version 1, and the lineage is the history plus that row.
+	revisions, err := s.ListConfigHistory(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("ListConfigHistory before any update: %v", err)
+	}
+	if len(revisions) != 0 {
+		t.Fatalf("history after create = %+v, want none", revisions)
+	}
+
+	if _, err := s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"15m"}`), 1, "alice", updateTime); err != nil {
+		t.Fatalf("UpdateRepositoryConfig: %v", err)
+	}
+
+	revisions, err = s.ListConfigHistory(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("ListConfigHistory: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("history = %+v, want exactly the one superseded revision", revisions)
+	}
+	got := revisions[0]
+	if got.Repository != "cfg" || got.Version != 1 {
+		t.Errorf("revision = %s@%d, want cfg@1: the version replaced, not the one written",
+			got.Repository, got.Version)
+	}
+	if string(got.Config) != `{"example":true}` {
+		t.Errorf("revision config = %s, want the document that was replaced", got.Config)
+	}
+	if got.Actor != "alice" {
+		t.Errorf("revision actor = %q, want the subject that replaced it", got.Actor)
+	}
+	if !got.At.Equal(updateTime) {
+		t.Errorf("revision time = %v, want the caller's %v", got.At, updateTime)
+	}
+
+	// A rejected write leaves no trace: the stale update below must not add a
+	// revision for a change that never happened.
+	_, err = s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"1h"}`), 1, "bob", updateTime)
+	requireErrIs(t, err, meta.ErrStale, "UpdateRepositoryConfig with a stale version")
+	revisions, err = s.ListConfigHistory(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("ListConfigHistory after a stale write: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Errorf("history = %+v, want the refused write to have added nothing", revisions)
+	}
+}
+
+// Two updates give two revisions, oldest first, and the live row holds the
+// third document. The order is contract: a support bundle reads this as a
+// timeline, and an unordered answer would read as one.
+func testConfigHistoryAccumulatesInVersionOrder(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "cfg", meta.Proxy)
+
+	if _, err := s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"15m"}`), 1, "alice", updateTime); err != nil {
+		t.Fatalf("first UpdateRepositoryConfig: %v", err)
+	}
+	later := updateTime.Add(time.Hour)
+	if _, err := s.UpdateRepositoryConfig(ctx(), "cfg", []byte(`{"ttl":"1h"}`), 2, "bob", later); err != nil {
+		t.Fatalf("second UpdateRepositoryConfig: %v", err)
+	}
+
+	revisions, err := s.ListConfigHistory(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("ListConfigHistory: %v", err)
+	}
+	if len(revisions) != 2 {
+		t.Fatalf("history = %+v, want two revisions", revisions)
+	}
+	want := []meta.ConfigRevision{
+		{Repository: "cfg", Version: 1, Config: []byte(`{"example":true}`), Actor: "alice", At: updateTime},
+		{Repository: "cfg", Version: 2, Config: []byte(`{"ttl":"15m"}`), Actor: "bob", At: later},
+	}
+	for i, w := range want {
+		got := revisions[i]
+		if got.Version != w.Version || string(got.Config) != string(w.Config) ||
+			got.Actor != w.Actor || !got.At.Equal(w.At) {
+			t.Errorf("revision %d = %+v, want %+v", i, got, w)
+		}
+	}
+
+	current, err := s.GetRepository(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("GetRepository: %v", err)
+	}
+	if current.ConfigVersion != 3 || string(current.Config) != `{"ttl":"1h"}` {
+		t.Errorf("live row = v%d %s, want v3 with the newest document",
+			current.ConfigVersion, current.Config)
+	}
+}
+
+// History dies with the entity, and a name recreated afterwards starts clean.
+// Inheriting a predecessor's lineage would attribute somebody else's upstreams
+// to a repository that never had them -- and for a proxy that is a disclosure,
+// not just an inaccuracy.
+func testConfigHistoryDiesWithTheRepository(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "cfg", meta.Proxy)
+	mustCreateRepo(t, s, "bystander", meta.Proxy)
+	for _, name := range []string{"cfg", "bystander"} {
+		if _, err := s.UpdateRepositoryConfig(ctx(), name, []byte(`{"ttl":"15m"}`), 1, "alice", updateTime); err != nil {
+			t.Fatalf("UpdateRepositoryConfig(%q): %v", name, err)
+		}
+	}
+
+	if err := s.DeleteRepository(ctx(), "cfg"); err != nil {
+		t.Fatalf("DeleteRepository: %v", err)
+	}
+
+	revisions, err := s.ListConfigHistory(ctx(), "cfg")
+	if err != nil {
+		t.Fatalf("ListConfigHistory after delete: %v", err)
+	}
+	if len(revisions) != 0 {
+		t.Errorf("history = %+v, want the lineage deleted with the entity", revisions)
+	}
+
+	// The neighbour's lineage is untouched: deletion is per entity.
+	if revisions, err = s.ListConfigHistory(ctx(), "bystander"); err != nil {
+		t.Fatalf("ListConfigHistory(bystander): %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Errorf("bystander history = %+v, want its one revision intact", revisions)
+	}
+
+	// Recreated at the same name, and starting from nothing.
+	mustCreateRepo(t, s, "cfg", meta.Hosted)
+	if revisions, err = s.ListConfigHistory(ctx(), "cfg"); err != nil {
+		t.Fatalf("ListConfigHistory after recreate: %v", err)
+	}
+	if len(revisions) != 0 {
+		t.Errorf("history = %+v, want a recreated entity to inherit nothing", revisions)
+	}
 }
 
 func testRepositoryConfigIsCopied(t *testing.T, s meta.Store) {
@@ -1577,9 +1732,10 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 			return err
 		}},
 		{"UpdateRepositoryConfig", func() error {
-			_, err := s.UpdateRepositoryConfig(ctx, "repo", []byte(`{}`), 1)
+			_, err := s.UpdateRepositoryConfig(ctx, "repo", []byte(`{}`), 1, "actor", testTime)
 			return err
 		}},
+		{"ListConfigHistory", func() error { _, err := s.ListConfigHistory(ctx, "repo"); return err }},
 		{"DeleteRepository", func() error { return s.DeleteRepository(ctx, "repo") }},
 		{"SetGroupMembers", func() error { return s.SetGroupMembers(ctx, "repo", nil) }},
 		{"ListGroupMembers", func() error { _, err := s.ListGroupMembers(ctx, "repo"); return err }},

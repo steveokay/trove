@@ -38,6 +38,11 @@ type Store struct {
 	repos   map[string]meta.Repository
 	members map[string][]meta.GroupMember
 
+	// Superseded configurations, keyed by entity name and appended in version
+	// order. They die with the entity: a repository created at a freed name is
+	// a different repository (ADR 0005).
+	configHistory map[string][]meta.ConfigRevision
+
 	// Content is keyed by repository, so deleting a repository cannot
 	// accidentally reach another's manifests.
 	manifests map[string]map[meta.Digest]meta.Manifest
@@ -87,8 +92,10 @@ func New() *Store {
 // newEmpty returns a store with nothing in it at all.
 func newEmpty() *Store {
 	return &Store{
-		repos:     make(map[string]meta.Repository),
-		members:   make(map[string][]meta.GroupMember),
+		repos:         make(map[string]meta.Repository),
+		members:       make(map[string][]meta.GroupMember),
+		configHistory: make(map[string][]meta.ConfigRevision),
+
 		manifests: make(map[string]map[meta.Digest]meta.Manifest),
 		refs:      make(map[string]map[meta.Digest][]meta.ManifestRef),
 		tags:      make(map[string]map[string]meta.Tag),
@@ -211,8 +218,11 @@ func (s *Store) ListRepositories(ctx context.Context, opts meta.ListOptions) (me
 	return page, nil
 }
 
-// UpdateRepositoryConfig replaces configuration under an optimistic version check.
-func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64) (meta.Repository, error) {
+// UpdateRepositoryConfig replaces configuration under an optimistic version
+// check, recording the superseded revision as it goes.
+func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64,
+	actor string, at time.Time,
+) (meta.Repository, error) {
 	if err := ctx.Err(); err != nil {
 		return meta.Repository{}, err
 	}
@@ -232,14 +242,51 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 			meta.ErrStale, name, repo.ConfigVersion, expectedVersion)
 	}
 
+	// The revision that is about to be replaced, recorded before it goes. The
+	// database stores appended together with the update in one transaction;
+	// here the lock is what makes the pair indivisible.
+	s.configHistory[name] = append(s.configHistory[name], meta.ConfigRevision{
+		Repository: name,
+		Version:    repo.ConfigVersion,
+		Config:     cloneJSON(repo.Config),
+		Actor:      actor,
+		At:         at,
+	})
+
 	repo.Config = cloneJSON(config)
 	repo.ConfigVersion++
+	repo.UpdatedAt = at
 	s.repos[name] = repo
 
 	return cloneRepo(repo), nil
 }
 
-// DeleteRepository removes a repository and its membership rows.
+// ListConfigHistory returns a repository's superseded configurations, oldest
+// version first.
+func (s *Store) ListConfigHistory(ctx context.Context, name string) ([]meta.ConfigRevision, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+
+	// Appended in version order under the same lock the update holds, so the
+	// slice is already sorted; the copy is so a caller cannot reach the
+	// stored revisions through it.
+	out := make([]meta.ConfigRevision, 0, len(s.configHistory[name]))
+	for _, revision := range s.configHistory[name] {
+		revision.Config = cloneJSON(revision.Config)
+		out = append(out, revision)
+	}
+	return out, nil
+}
+
+// DeleteRepository removes a repository, its membership rows, its
+// configuration history, and every piece of content stored under it.
 func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -257,6 +304,10 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 
 	delete(s.repos, name)
 	delete(s.members, name)
+	// The lineage dies with the entity: a repository created at this name
+	// afterwards is a different repository (ADR 0005). The database engines
+	// get the same effect from 0005's cascade.
+	delete(s.configHistory, name)
 
 	// Content is keyed by full name, so an entity's content is the name itself
 	// and everything beneath it (ADR 0005). belongsTo is what keeps this from

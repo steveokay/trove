@@ -43,14 +43,49 @@ type RepositoryStore interface {
 	// UpdateRepositoryConfig replaces a repository's configuration. The write
 	// fails with ErrStale unless expectedVersion matches the stored version,
 	// so concurrent edits cannot silently overwrite each other. The returned
-	// repository carries the new version.
-	UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64) (Repository, error)
+	// repository carries the new version and the given time as its UpdatedAt.
+	//
+	// In the same transaction it appends the *superseded* revision to the
+	// configuration history: the version and document that were stored until
+	// now, the actor replacing them, and when. Config changes are versioned so
+	// a support bundle can show their lineage (ADR 0005), and writing the
+	// history outside the transaction would let a crash leave a version nobody
+	// can account for. Creation writes no history row: the current row is the
+	// first revision, so the full lineage is the history plus the live row.
+	//
+	// The actor is the subject that made the change. It is recorded as given,
+	// and an empty actor means the change came from inside the process --
+	// seeding, a migration import -- rather than from a request; every admin
+	// API path supplies a subject name.
+	//
+	// The caller supplies the time: no store calls time.Now (§7).
+	UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64,
+		actor string, at time.Time) (Repository, error)
+
+	// ListConfigHistory returns a repository's superseded configurations,
+	// oldest version first. A repository that was never reconfigured, and one
+	// that does not exist, both return no revisions: history is a log rather
+	// than a resource, and asking about a name nobody used is not an error.
+	//
+	// There is deliberately no HTTP endpoint for this yet. A proxy's stored
+	// configuration is behind proxy:read (ADR 0002), and its history is the
+	// same disclosure with a longer tail -- including upstreams an operator
+	// has since removed. Deciding how that is exposed belongs with the
+	// support-bundle task, which is the first caller that needs it; until
+	// then the lineage is readable through the store, by tests and by that
+	// task, and by nothing that answers a request.
+	ListConfigHistory(ctx context.Context, name string) ([]ConfigRevision, error)
 
 	// DeleteRepository removes a repository entity, its group membership rows,
-	// and every piece of content stored under it -- the name itself and every
-	// name beneath it, since `team-a` is the entity that holds `team-a/api`
-	// (ADR 0005). It all happens in one transaction: an entity that was half
-	// deleted would leave content nothing routes to.
+	// its configuration history, and every piece of content stored under it --
+	// the name itself and every name beneath it, since `team-a` is the entity
+	// that holds `team-a/api` (ADR 0005). It all happens in one transaction: an
+	// entity that was half deleted would leave content nothing routes to.
+	//
+	// The history goes with the entity deliberately. A name is free once it is
+	// deleted, and a repository created at that name afterwards is a different
+	// repository: inheriting a predecessor's lineage would attribute somebody
+	// else's upstreams and settings to it.
 	//
 	// The deletion is immediate and irreversible for hosted content, which is
 	// the decision rather than an oversight (Q16): there is no trash can, and

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/sqlutil"
@@ -118,8 +119,11 @@ func (s *Store) ListRepositories(ctx context.Context, opts meta.ListOptions) (me
 func scanRepositoryRow(rows *sql.Rows) (meta.Repository, error) { return scanRepository(rows) }
 
 // UpdateRepositoryConfig replaces configuration under an optimistic version
-// check, so two concurrent editors cannot silently overwrite each other.
-func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64) (meta.Repository, error) {
+// check, so two concurrent editors cannot silently overwrite each other, and
+// records the superseded revision in the same transaction.
+func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64,
+	actor string, at time.Time,
+) (meta.Repository, error) {
 	if err := s.ready(ctx); err != nil {
 		return meta.Repository{}, err
 	}
@@ -134,9 +138,19 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 			return fmt.Errorf("%w: repository %q is at version %d, not %d",
 				meta.ErrStale, name, current.ConfigVersion, expectedVersion)
 		}
+		// The revision goes in before the row moves on, and inside the same
+		// transaction: a lineage with a gap in it is worse than no lineage,
+		// because it reads as a version nobody changed (ADR 0005).
 		if _, err := sqlutil.Execute(ctx, tx,
-			`UPDATE repositories SET config = $1, config_version = config_version + 1 WHERE name = $2`,
-			config, name); err != nil {
+			`INSERT INTO repository_config_history (repo_name, version, config, actor, at)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			name, current.ConfigVersion, []byte(current.Config), actor, sqlutil.Millis(at)); err != nil {
+			return err
+		}
+		if _, err := sqlutil.Execute(ctx, tx,
+			`UPDATE repositories SET config = $1, config_version = config_version + 1, updated_at = $2
+			 WHERE name = $3`,
+			config, sqlutil.Millis(at), name); err != nil {
 			return err
 		}
 		updated, err = s.repository(ctx, tx, name)
@@ -148,6 +162,33 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 	return updated, nil
 }
 
+// ListConfigHistory returns a repository's superseded configurations, oldest
+// version first.
+func (s *Store) ListConfigHistory(ctx context.Context, name string) ([]meta.ConfigRevision, error) {
+	if err := s.ready(ctx); err != nil {
+		return nil, err
+	}
+
+	return sqlutil.Collect(ctx, s.db,
+		`SELECT repo_name, version, config, actor, at
+		 FROM repository_config_history WHERE repo_name = $1 ORDER BY version`,
+		[]any{name}, scanConfigRevision)
+}
+
+func scanConfigRevision(rows *sql.Rows) (meta.ConfigRevision, error) {
+	var (
+		revision meta.ConfigRevision
+		config   []byte
+		at       sql.NullInt64
+	)
+	if err := rows.Scan(&revision.Repository, &revision.Version, &config, &revision.Actor, &at); err != nil {
+		return meta.ConfigRevision{}, err
+	}
+	revision.Config = json.RawMessage(config)
+	revision.At = sqlutil.AsTime(at)
+	return revision, nil
+}
+
 // DeleteRepository removes a repository entity and everything stored under it.
 //
 // Content is keyed by full name and no longer holds a key to this row (0004),
@@ -155,7 +196,9 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 // beneath it. Deleting the manifests takes their tags and reference edges with
 // them through the keys 0004 kept, which is why those two tables are not
 // listed here. Membership rows still cascade from the repositories row, so a
-// group cannot resolve to an entity that is gone.
+// group cannot resolve to an entity that is gone, and configuration history
+// cascades with them (0005): a repository created at this name afterwards is a
+// different repository and must not inherit a predecessor's lineage.
 //
 // It is one transaction: an entity deleted without its content would leave
 // content nothing can route to, and content deleted without its entity would
