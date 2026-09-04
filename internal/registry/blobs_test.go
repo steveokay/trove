@@ -2,6 +2,7 @@ package registry_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveokay/trove/internal/artifact"
 	"github.com/steveokay/trove/internal/blob"
 	blobmem "github.com/steveokay/trove/internal/blob/memory"
 	"github.com/steveokay/trove/internal/meta"
@@ -19,9 +21,24 @@ import (
 
 var fixedTime = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
-// stack is the registry over real stores: carol pushes to team-a/*, rita
-// only reads it, and secret/vault exists for nobody they can see. The proxy
-// repository proves pushes are refused by type, not by permission.
+// stack is the registry over real stores.
+//
+// Three repository entities, each mounted at a first path segment (ADR 0005):
+// `team-a` is hosted and holds the content at `team-a/api`, `mirror` is a
+// proxy, and `secret` holds `secret/vault`. The entity is what a request
+// routes to; the full name is what bindings match and what content is keyed
+// by, which is why carol's grant is still written `team-a/*`.
+//
+// carol pushes, rita only reads, mona may also delete manifests, and nobody
+// holds anything under `secret`. All three are granted on `mirror` as well:
+// a proxy must refuse a push by type rather than by permission, and a
+// refusal the guard produced would prove nothing about the type.
+//
+// carol alone also holds the entity names themselves (`team-a`, `mirror`) and
+// the absent entity `ghost/*`, because a `team-a/*` scope stops short of the
+// bare name it is written under. That is what lets her exercise content stored
+// directly at an entity, and reach the handler's own 404 for an entity that is
+// not there rather than the guard's.
 type stack struct {
 	handler http.Handler
 	// router is the same value as handler, kept typed so a test file can
@@ -49,9 +66,9 @@ func newStack(t *testing.T) stack {
 		}
 	}
 	for _, repo := range []meta.Repository{
-		{Name: "team-a/api", Type: meta.Hosted},
-		{Name: "team-a/mirror", Type: meta.Proxy},
-		{Name: "secret/vault", Type: meta.Hosted},
+		{Name: "team-a", Type: meta.Hosted},
+		{Name: "mirror", Type: meta.Proxy},
+		{Name: "secret", Type: meta.Hosted},
 	} {
 		if _, err := metaDB.CreateRepository(ctx, repo); err != nil {
 			t.Fatalf("CreateRepository: %v", err)
@@ -70,6 +87,21 @@ func newStack(t *testing.T) stack {
 		{ID: "b-carol", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "team-a/*"},
 		{ID: "b-rita", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "team-a/*"},
 		{ID: "b-mona", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-mona", Role: "maintainer", Scope: "team-a/*"},
+		// The proxy, so its refusals come from its type.
+		{ID: "b-carol-mirror", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "mirror/*"},
+		{ID: "b-rita-mirror", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "mirror/*"},
+		{ID: "b-mona-mirror", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-mona", Role: "maintainer", Scope: "mirror/*"},
+		// The bare entity names. A `team-a/*` scope grants what is under
+		// `team-a/`, never `team-a` itself (ADR 0001), and content may live
+		// directly at an entity -- full name equals entity.
+		{ID: "b-carol-entity", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "team-a"},
+		{ID: "b-rita-entity", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "team-a"},
+		{ID: "b-carol-mirror-entity", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "mirror"},
+		{ID: "b-rita-mirror-entity", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "mirror"},
+		// An entity that does not exist. carol is allowed everything under it,
+		// so a request there is refused by the handler's resolution rather than
+		// by the guard -- which is what makes the two 404s comparable.
+		{ID: "b-carol-ghost", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "ghost/*"},
 	} {
 		if err := metaDB.CreateBinding(ctx, binding); err != nil {
 			t.Fatalf("CreateBinding: %v", err)
@@ -276,13 +308,28 @@ func TestCrossRepoMount(t *testing.T) {
 		t.Fatalf("PutBlob: %v", err)
 	}
 
-	t.Run("readable source mounts", func(t *testing.T) {
+	t.Run("a source inside a readable entity mounts", func(t *testing.T) {
 		t.Parallel()
+		// team-a/other holds no content, but it is a name inside an entity
+		// carol can read, and that is what the mount checks: blobs are
+		// content-addressed and global, so the question is whether she may
+		// read from where she says she got it, not whether a row exists for
+		// that exact name (ADR 0005 -- there never is one).
 		rec := s.do(t, http.MethodPost,
 			"/v2/team-a/api/blobs/uploads/?mount="+digest.String()+"&from=team-a/other", "carol", "")
-		// team-a/other does not exist as a repository -- mount requires it.
+		if rec.Code != http.StatusCreated || rec.Header().Get("Docker-Content-Digest") != digest.String() {
+			t.Fatalf("mount from a readable name: %d %s", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("a source in an absent entity falls back", func(t *testing.T) {
+		t.Parallel()
+		// carol may write everything under ghost/*, so this is the entity
+		// resolution refusing rather than the permission check.
+		rec := s.do(t, http.MethodPost,
+			"/v2/team-a/api/blobs/uploads/?mount="+digest.String()+"&from=ghost/none", "carol", "")
 		if rec.Code != http.StatusAccepted {
-			t.Fatalf("mount from an absent repo: %d, want the 202 fallback", rec.Code)
+			t.Fatalf("mount from an absent entity: %d, want the 202 fallback", rec.Code)
 		}
 	})
 
@@ -360,7 +407,7 @@ func TestUploadRefusals(t *testing.T) {
 	}{
 		{
 			name: "commit under a proxy repository is denied", method: http.MethodPut,
-			target: "/v2/team-a/mirror/blobs/uploads/deadbeef?digest=" + layerDigest().String(), as: "carol",
+			target: "/v2/mirror/library/nginx/blobs/uploads/deadbeef?digest=" + layerDigest().String(), as: "carol",
 			wantCode: http.StatusForbidden, wantBody: registry.CodeDenied,
 		},
 		{
@@ -374,17 +421,17 @@ func TestUploadRefusals(t *testing.T) {
 			wantCode: http.StatusNotFound, wantBody: registry.CodeBlobUploadUnknown,
 		},
 		{
-			name: "cancel under an absent repository is unknown", method: http.MethodDelete,
+			name: "cancel under an absent entity is unknown", method: http.MethodDelete,
 			target: "/v2/ghost/none/blobs/uploads/deadbeef", as: "carol",
 			wantCode: http.StatusNotFound, wantBody: registry.CodeNameUnknown,
 		},
 		{
 			name: "status under a proxy repository is denied", method: http.MethodGet,
-			target: "/v2/team-a/mirror/blobs/uploads/deadbeef", as: "carol",
+			target: "/v2/mirror/library/nginx/blobs/uploads/deadbeef", as: "carol",
 			wantCode: http.StatusForbidden, wantBody: registry.CodeDenied,
 		},
 		{
-			name: "reading a blob in an absent repository is name-unknown", method: http.MethodGet,
+			name: "reading a blob in an absent entity is name-unknown", method: http.MethodGet,
 			target: "/v2/ghost/none/blobs/" + layerDigest().String(), as: "carol",
 			wantCode: http.StatusNotFound, wantBody: registry.CodeNameUnknown,
 		},
@@ -407,12 +454,22 @@ func TestUploadRefusals(t *testing.T) {
 		},
 		{
 			name: "a proxy repository refuses pushes", method: http.MethodPost,
-			target: "/v2/team-a/mirror/blobs/uploads/", as: "carol",
+			target: "/v2/mirror/library/nginx/blobs/uploads/", as: "carol",
 			wantCode: http.StatusForbidden, wantBody: registry.CodeDenied,
 		},
 		{
-			name: "an absent repository is unknown", method: http.MethodPost,
-			target: "/v2/team-a/ghost/blobs/uploads/", as: "carol",
+			// The bare entity is refused on the same grounds: the type is the
+			// whole of the rule, and it does not depend on the remainder.
+			name: "a proxy entity refuses pushes to its own name", method: http.MethodPost,
+			target: "/v2/mirror/blobs/uploads/", as: "carol",
+			wantCode: http.StatusForbidden, wantBody: registry.CodeDenied,
+		},
+		{
+			// `ghost` is not an entity. carol may write everything under
+			// ghost/*, so the guard admits her and the resolution refuses --
+			// which is the 404 that has to match the guard's own, below.
+			name: "an absent entity is unknown", method: http.MethodPost,
+			target: "/v2/ghost/none/blobs/uploads/", as: "carol",
 			wantCode: http.StatusNotFound, wantBody: registry.CodeNameUnknown,
 		},
 		{
@@ -462,8 +519,12 @@ func TestUploadRefusals(t *testing.T) {
 }
 
 // The push-path 404 for a repository the subject cannot see is byte-identical
-// to the one for a repository that is not there, through the same guard the
-// content routes share (ADR 0003).
+// to the one for a repository that is not there (ADR 0003) -- and the two are
+// now produced by different code. carol holds nothing under `secret`, so the
+// guard refuses that one before the handler runs; she holds everything under
+// `ghost/*`, so that one is admitted and the entity resolution refuses it.
+// Two answers from two places that must not differ by a byte, which is why
+// both go through the one error constructor.
 func TestHiddenAndAbsentRepositoriesAnswerAlike(t *testing.T) {
 	t.Parallel()
 
@@ -476,6 +537,93 @@ func TestHiddenAndAbsentRepositoriesAnswerAlike(t *testing.T) {
 	if hidden.Code != absent.Code || hidden.Body.String() != absent.Body.String() {
 		t.Fatalf("hidden %d %s vs absent %d %s: want byte-identical",
 			hidden.Code, hidden.Body, absent.Code, absent.Body)
+	}
+	if fmt.Sprint(hidden.Header()) != fmt.Sprint(absent.Header()) {
+		t.Fatalf("headers differ: %v vs %v", hidden.Header(), absent.Header())
+	}
+}
+
+// Prefix routing, end to end (ADR 0005): a request is served by the entity at
+// the first path segment of its name, and everything below that segment is
+// remainder. The fixture has exactly one hosted entity, `team-a`, and these
+// pushes all land on it -- there is no row named `team-a/api`, and there never
+// will be, because an entity is one segment.
+//
+// What the full name still decides is identity: content is keyed by it, so two
+// remainders under one entity are two repositories as far as a client is
+// concerned.
+func TestEntityRoutingKeysContentByFullName(t *testing.T) {
+	t.Parallel()
+
+	s := newStack(t)
+	seedImageBlobs(t, s)
+	payload := imageManifest()
+	digest := manifestDigest(payload)
+
+	// A bare entity name is a legal repository: the full name equals the
+	// entity, and nothing about the routing changes.
+	for _, name := range []string{"team-a", "team-a/api", "team-a/deep/nested/name"} {
+		t.Run(name, func(t *testing.T) {
+			rec := s.do(t, http.MethodPut, "/v2/"+name+"/manifests/v1", "carol", payload,
+				"Content-Type", artifact.MediaTypeOCIManifest)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("PUT /v2/%s/manifests/v1: %d %s", name, rec.Code, rec.Body)
+			}
+			if got := rec.Header().Get("Location"); got != "/v2/"+name+"/manifests/"+digest {
+				t.Errorf("Location = %q, want the full name back, not the entity", got)
+			}
+			if rec := s.do(t, http.MethodGet, "/v2/"+name+"/manifests/v1", "carol", ""); rec.Code != http.StatusOK {
+				t.Fatalf("GET /v2/%s/manifests/v1: %d %s", name, rec.Code, rec.Body)
+			}
+		})
+	}
+
+	// The row the store holds is the entity's, and only the entity's: a
+	// repository named for the full name is what 0004 exists to stop needing.
+	if _, err := s.metaDB.GetRepository(context.Background(), "team-a/api"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetRepository(team-a/api) = %v, want not-found: content names are not entities", err)
+	}
+	if _, err := s.metaDB.GetManifest(context.Background(), "team-a/api", meta.Digest(digest)); err != nil {
+		t.Errorf("the manifest is not keyed by its full name: %v", err)
+	}
+
+	// Two remainders under one entity are two repositories: the tag pushed to
+	// one does not resolve under the other, even though both route through
+	// `team-a` and the guard admitted both.
+	rec := s.do(t, http.MethodGet, "/v2/team-a/web/manifests/v1", "carol", "")
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), registry.CodeManifestUnknown) {
+		t.Fatalf("a sibling remainder served another's tag: %d %s", rec.Code, rec.Body)
+	}
+	// It is the content that is missing, not the route: pushing there works.
+	if rec := s.do(t, http.MethodPut, "/v2/team-a/web/manifests/v1", "carol", payload,
+		"Content-Type", artifact.MediaTypeOCIManifest); rec.Code != http.StatusCreated {
+		t.Fatalf("PUT to an unused remainder of a live entity: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// The blob routes route the same way, and a blob pushed through one remainder
+// is readable through another: blobs are content-addressed and stored once
+// (ADR 0007), so the name in the path is a permission and routing question,
+// never a second copy.
+func TestEntityRoutingOnTheBlobRoutes(t *testing.T) {
+	t.Parallel()
+
+	s := newStack(t)
+	digest := layerDigest().String()
+
+	rec := s.do(t, http.MethodPost, "/v2/team-a/deep/nested/name/blobs/uploads/?digest="+digest, "carol", layer)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("monolithic push through a deep remainder: %d %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Location"); got != "/v2/team-a/deep/nested/name/blobs/"+digest {
+		t.Errorf("Location = %q, want the full name", got)
+	}
+
+	for _, name := range []string{"team-a", "team-a/api", "team-a/deep/nested/name"} {
+		if rec := s.do(t, http.MethodGet, "/v2/"+name+"/blobs/"+digest, "rita", ""); rec.Code != http.StatusOK ||
+			rec.Body.String() != layer {
+			t.Errorf("GET /v2/%s/blobs/%s: %d, body %q", name, digest, rec.Code, rec.Body)
+		}
 	}
 }
 

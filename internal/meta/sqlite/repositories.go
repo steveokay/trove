@@ -143,23 +143,44 @@ func (s *Store) UpdateRepositoryConfig(ctx context.Context, name string, config 
 	return updated, nil
 }
 
-// DeleteRepository removes a repository. Its content, membership rows, and
-// upload sessions go with it through the schema's cascades; a group that
-// listed it loses the member, so nothing resolves to a repository that is
-// gone.
+// DeleteRepository removes a repository entity and everything stored under it.
+//
+// Content is keyed by full name and no longer holds a key to this row (0004),
+// so the sweep is explicit and by name: the entity itself, plus everything
+// beneath it. Deleting the manifests takes their tags and reference edges with
+// them through the keys 0004 kept, which is why those two tables are not
+// listed here. Membership rows still cascade from the repositories row, so a
+// group cannot resolve to an entity that is gone.
+//
+// It is one transaction: an entity deleted without its content would leave
+// content nothing can route to, and content deleted without its entity would
+// lose the rows that say what it was.
 func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
 
-	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM repositories WHERE name = ?`, name)
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return meta.NotFound("repository", name)
-	}
-	return nil
+	low, high := sqlutil.EntityContentRange(name)
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		for _, table := range []string{"upload_sessions", "manifests"} {
+			if _, err := sqlutil.Execute(ctx, tx,
+				`DELETE FROM `+table+` WHERE repo_name = ? OR (repo_name >= ? AND repo_name < ?)`,
+				name, low, high); err != nil {
+				return err
+			}
+		}
+
+		affected, err := sqlutil.Execute(ctx, tx, `DELETE FROM repositories WHERE name = ?`, name)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			// Nothing existed to delete, so nothing should have been: the
+			// rollback takes the content deletions above with it.
+			return meta.NotFound("repository", name)
+		}
+		return nil
+	})
 }
 
 // SetGroupMembers replaces a group's ordered member list atomically.

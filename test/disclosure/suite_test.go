@@ -14,6 +14,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,9 +42,17 @@ var pendingSurfaces = map[string]string{
 	"audit log (the deliberate exception)": "E-009",
 }
 
-// fixture is the registry every surface walks: carol reads team-a/*, the
-// secret/* repositories exist and are readable by nobody but root, and
-// anonymous holds nothing.
+// fixture is the registry every surface walks: carol reads team-a and
+// everything under it, the secret/* content exists and is readable by nobody
+// but root, and anonymous holds nothing.
+//
+// Two repository entities, `team-a` and `secret`, each mounted at a first path
+// segment (ADR 0005); the four names below them are content, keyed by full
+// name and holding no row of their own. carol is bound twice because a
+// `team-a/*` scope grants what is under `team-a/` and never the bare name
+// itself -- the pair is what a team lead would actually hold, and it is what
+// lets the entity listing and the content listing both have something visible
+// and something hidden.
 type fixture struct {
 	store  *memory.Store
 	router *server.Router
@@ -66,9 +75,22 @@ func newFixture(t *testing.T) fixture {
 			t.Fatalf("CreateSubject: %v", err)
 		}
 	}
-	for _, name := range []string{"team-a/api", "team-a/web", "secret/vault", "secret/keys"} {
+	for _, name := range []string{"team-a", "secret"} {
 		if _, err := store.CreateRepository(ctx, meta.Repository{Name: name, Type: meta.Hosted}); err != nil {
 			t.Fatalf("CreateRepository: %v", err)
+		}
+	}
+	// Content under both entities, so every surface below has something real
+	// to hide rather than a name that happens to be absent.
+	for i, name := range []string{"team-a/api", "team-a/web", "secret/vault", "secret/keys"} {
+		if err := store.PutManifest(ctx, meta.Manifest{
+			Repository: name,
+			Digest:     meta.Digest(fmt.Sprintf("sha256:%064x", i+1)),
+			MediaType:  "application/vnd.oci.image.manifest.v1+json",
+			Payload:    []byte("{}"),
+			Size:       2,
+		}, nil); err != nil {
+			t.Fatalf("PutManifest(%q): %v", name, err)
 		}
 	}
 	for _, role := range []meta.Role{
@@ -81,6 +103,7 @@ func newFixture(t *testing.T) fixture {
 	}
 	for _, binding := range []meta.Binding{
 		{ID: "b-carol", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "developer", Scope: "team-a/*"},
+		{ID: "b-carol-entity", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "developer", Scope: "team-a"},
 		{ID: "b-root", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-root", Role: "everything", Scope: "*"},
 		{ID: "b-root-sys", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-root", Role: "everything", Scope: "system"},
 	} {
@@ -129,16 +152,24 @@ func (f fixture) get(t *testing.T, as, target string) *httptest.ResponseRecorder
 	return rec
 }
 
-// visible runs the exact pipeline a catalog handler will: the subject's
-// effective bindings, compiled into a visibility, filtering in the query.
-func visible(t *testing.T, store *memory.Store, subject string, limit int, cursor string) meta.RepositoryPage {
+// listingVisibility compiles a subject's bindings the way a listing handler
+// does: effective bindings, then the visibility repo:list grants.
+func listingVisibility(t *testing.T, store *memory.Store, subject string) meta.Visibility {
 	t.Helper()
 	bindings, err := server.FetchBindings(context.Background(), store, subject)
 	if err != nil {
 		t.Fatalf("FetchBindings: %v", err)
 	}
+	return server.VisibilityFor(bindings, authz.RepoList)
+}
+
+// visible runs the exact pipeline the admin API's repository listing will: the
+// subject's effective bindings, compiled into a visibility, filtering in the
+// query. This surface lists repository *entities* (ADR 0005).
+func visible(t *testing.T, store *memory.Store, subject string, limit int, cursor string) meta.RepositoryPage {
+	t.Helper()
 	page, err := store.ListRepositories(context.Background(), meta.ListOptions{
-		Visibility: server.VisibilityFor(bindings, authz.RepoList),
+		Visibility: listingVisibility(t, store, subject),
 		Limit:      limit,
 		Cursor:     cursor,
 	})
@@ -151,32 +182,76 @@ func visible(t *testing.T, store *memory.Store, subject string, limit int, curso
 // Surface 1: repository listings. The hidden subtree is absent from the
 // results, from the counts, and from every cursor -- a cursor naming a
 // hidden repository would disclose it as surely as listing it.
+//
+// There are two listings and both are walked, because they answer different
+// questions and each could leak on its own: which entities exist, which the
+// admin API pages through, and which names hold content, which is the /v2/
+// catalog (ADR 0005). A page size of 1 forces a cursor at every step.
 func TestSurfaceCatalog(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 
-	var names []string
-	cursor := ""
-	for {
-		page := visible(t, f.store, "carol", 1, cursor)
-		for _, repo := range page.Repositories {
-			names = append(names, repo.Name)
+	t.Run("entities", func(t *testing.T) {
+		var names []string
+		cursor := ""
+		for pages := 0; pages < 8; pages++ {
+			page := visible(t, f.store, "carol", 1, cursor)
+			for _, repo := range page.Repositories {
+				names = append(names, repo.Name)
+			}
+			if page.NextCursor == "" {
+				break
+			}
+			if strings.HasPrefix(page.NextCursor, "secret") {
+				t.Fatalf("cursor %q names a hidden entity", page.NextCursor)
+			}
+			cursor = page.NextCursor
 		}
-		if page.NextCursor == "" {
-			break
+		if len(names) != 1 || names[0] != "team-a" {
+			t.Fatalf("carol's entities = %v, want exactly the one she is bound to", names)
 		}
-		if strings.HasPrefix(page.NextCursor, "secret/") {
-			t.Fatalf("cursor %q names a hidden repository", page.NextCursor)
-		}
-		cursor = page.NextCursor
-	}
-	if len(names) != 2 || names[0] != "team-a/api" || names[1] != "team-a/web" {
-		t.Fatalf("carol's catalog = %v, want exactly her subtree", names)
-	}
+	})
 
-	if got := visible(t, f.store, "bob", 0, ""); len(got.Repositories) != 0 {
-		t.Fatalf("bob's catalog = %v, want empty: he holds no bindings", got.Repositories)
-	}
+	t.Run("content names", func(t *testing.T) {
+		var names []string
+		cursor := ""
+		for pages := 0; pages < 8; pages++ {
+			page, err := f.store.ListContentNames(context.Background(), meta.ListOptions{
+				Visibility: listingVisibility(t, f.store, "carol"),
+				Limit:      1,
+				Cursor:     cursor,
+			})
+			if err != nil {
+				t.Fatalf("ListContentNames: %v", err)
+			}
+			names = append(names, page.Names...)
+			if page.NextCursor == "" {
+				break
+			}
+			if strings.HasPrefix(page.NextCursor, "secret/") {
+				t.Fatalf("cursor %q names hidden content", page.NextCursor)
+			}
+			cursor = page.NextCursor
+		}
+		if len(names) != 2 || names[0] != "team-a/api" || names[1] != "team-a/web" {
+			t.Fatalf("carol's catalog = %v, want exactly her subtree", names)
+		}
+	})
+
+	t.Run("a subject with no bindings sees neither", func(t *testing.T) {
+		if got := visible(t, f.store, "bob", 0, ""); len(got.Repositories) != 0 {
+			t.Errorf("bob's entities = %v, want empty: he holds no bindings", got.Repositories)
+		}
+		page, err := f.store.ListContentNames(context.Background(), meta.ListOptions{
+			Visibility: listingVisibility(t, f.store, "bob"),
+		})
+		if err != nil {
+			t.Fatalf("ListContentNames: %v", err)
+		}
+		if len(page.Names) != 0 {
+			t.Errorf("bob's catalog = %v, want empty: he holds no bindings", page.Names)
+		}
+	})
 }
 
 // Surface 2, store half: an unreadable repository's tag list answers exactly

@@ -44,10 +44,10 @@ type Referrers struct {
 // second half of the check is the handler's, because the route table holds one
 // verb per route by design (ADR 0002).
 func (rf *Referrers) Register(r *server.Router) {
-	repo := func(req *http.Request) (authz.Resource, error) {
+	resource := func(req *http.Request) (authz.Resource, error) {
 		return authz.Repository(server.OCIName(req))
 	}
-	read := server.Permission{Verb: authz.ReferrerRead, Resource: repo}
+	read := server.Permission{Verb: authz.ReferrerRead, Resource: resource}
 
 	r.HandleOCI(http.MethodGet, "/referrers/{digest}", read, http.HandlerFunc(rf.list))
 }

@@ -264,3 +264,16 @@ type TagPage struct {
 	Tags       []Tag
 	NextCursor string
 }
+
+// ContentNamePage is one page of the full OCI repository names that hold
+// hosted content. NextCursor is empty on the last page.
+//
+// It carries names rather than Repository rows because a content name is not
+// a repository entity: an entity is mounted at the first path segment, and
+// `team-a/api` is content inside the entity `team-a` (ADR 0005). The catalog
+// answers with these names, so what a client pulls from is what it was told
+// about.
+type ContentNamePage struct {
+	Names      []string
+	NextCursor string
+}

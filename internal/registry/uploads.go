@@ -13,6 +13,7 @@ import (
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/blob"
 	"github.com/steveokay/trove/internal/meta"
+	"github.com/steveokay/trove/internal/repo"
 	"github.com/steveokay/trove/internal/server"
 )
 
@@ -122,12 +123,19 @@ func (b *Blobs) mount(w http.ResponseWriter, r *http.Request, name, rawDigest, f
 		return false
 	}
 	// The mount is gated on reading the source (R-001): the same live
-	// bindings a pull from it would check.
+	// bindings a pull from it would check. The check is on the full name,
+	// because that is what a binding scope matches.
 	bindings, err := server.FetchBindings(r.Context(), b.Bindings, subject.Name)
 	if err != nil || !authz.Allows(bindings, authz.RepoRead, source) {
 		return false
 	}
-	if _, err := b.Meta.GetRepository(r.Context(), from); err != nil {
+	// The source has to route somewhere, and what routes is its entity
+	// (ADR 0005): a pull from `from` would resolve the same first segment.
+	sourceEntity, _, err := repo.Split(from)
+	if err != nil {
+		return false
+	}
+	if _, err := b.Meta.GetRepository(r.Context(), sourceEntity); err != nil {
 		return false
 	}
 	if _, err := b.Meta.GetBlob(r.Context(), meta.Digest(digest)); err != nil {

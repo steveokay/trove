@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,12 +46,17 @@ func Run(t *testing.T, f Factory) {
 		{"GroupMembership", testGroupMembership},
 		{"GroupMembershipRules", testGroupMembershipRules},
 		{"ManifestCRUD", testManifestCRUD},
+		{"ContentLivesUnderItsEntity", testContentLivesUnderItsEntity},
 		{"ManifestRefs", testManifestRefs},
 		{"ManifestDeleteRefusedWhileIndexed", testManifestDeleteRefusedWhileIndexed},
 		{"Referrers", testReferrers},
 		{"Tags", testTags},
 		{"TagsRequireVisibility", testTagsRequireVisibility},
 		{"TagsPaginate", testTagsPaginate},
+		{"ListContentNamesFiltersByVisibility", testListContentNamesFiltersByVisibility},
+		{"ListContentNamesAreDistinct", testListContentNamesAreDistinct},
+		{"ListContentNamesPaginateUnderFiltering", testListContentNamesPaginateUnderFiltering},
+		{"ListContentNamesCursorIsStableUnderWrites", testListContentNamesCursorIsStableUnderWrites},
 		{"DeletingManifestRemovesItsTags", testDeletingManifestRemovesItsTags},
 		{"Blobs", testBlobs},
 		{"Uploads", testUploads},
@@ -111,6 +117,24 @@ func mustCreateRepo(t *testing.T, s meta.Store, name string, typ meta.Repository
 		t.Fatalf("CreateRepository(%q): %v", name, err)
 	}
 	return repo
+}
+
+// mustSeedContent stores a manifest under a full content name, creating the
+// entity that name belongs to if nothing has yet. Content is keyed by the full
+// name and the row it needs is the entity -- its first path segment -- so a
+// test that wants content at `team-a/api` has to say `team-a` once (ADR 0005).
+func mustSeedContent(t *testing.T, s meta.Store, name string) {
+	t.Helper()
+
+	entity, _, _ := strings.Cut(name, "/")
+	_, err := s.GetRepository(ctx(), entity)
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		mustCreateRepo(t, s, entity, meta.Hosted)
+	case err != nil:
+		t.Fatalf("GetRepository(%q): %v", entity, err)
+	}
+	mustPutManifest(t, s, name, digest("content-"+name))
 }
 
 func mustPutManifest(t *testing.T, s meta.Store, repo string, d meta.Digest, refs ...meta.ManifestRef) meta.Manifest {
@@ -635,10 +659,58 @@ func testManifestCRUD(t *testing.T, s meta.Store) {
 	requireErrIs(t, s.DeleteManifest(ctx(), "repo", d), meta.ErrNotFound, "DeleteManifest twice")
 
 	err = s.PutManifest(ctx(), meta.Manifest{Repository: "ghost", Digest: d}, nil)
-	requireErrIs(t, err, meta.ErrNotFound, "PutManifest into a missing repository")
+	requireErrIs(t, err, meta.ErrNotFound, "PutManifest into a missing entity")
 
 	err = s.PutManifest(ctx(), meta.Manifest{Repository: "repo"}, nil)
 	requireErrIs(t, err, meta.ErrInvalid, "PutManifest without a digest")
+}
+
+// A repository entity is mounted at the first path segment of a name, so the
+// entity `team-a` holds `team-a/api` and there is never a row named
+// `team-a/api` for it to hold (ADR 0005). Every write therefore checks the
+// entity, and this is the case that says so: with one entity row and nothing
+// else, content lands under a remainder, under a deeper remainder, and under
+// the bare entity name -- and refuses when the entity is the thing that is
+// missing.
+func testContentLivesUnderItsEntity(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "team-a", meta.Hosted)
+	// A neighbour whose name merely starts the same way, so nothing below can
+	// pass by matching a prefix rather than a path segment.
+	mustCreateRepo(t, s, "team-alpha", meta.Hosted)
+
+	for _, name := range []string{"team-a", "team-a/api", "team-a/deep/nested/name"} {
+		t.Run(name, func(t *testing.T) {
+			d := digest("entity-" + name)
+			mustPutManifest(t, s, name, d)
+
+			got, err := s.GetManifest(ctx(), name, d)
+			if err != nil {
+				t.Fatalf("GetManifest(%q): %v", name, err)
+			}
+			if got.Repository != name {
+				t.Errorf("manifest came back under %q, want the full name %q", got.Repository, name)
+			}
+			if err := s.PutTag(ctx(), meta.Tag{Repository: name, Name: "v1", Digest: d}); err != nil {
+				t.Errorf("PutTag(%q): %v", name, err)
+			}
+			if err := s.CreateUpload(ctx(), meta.UploadSession{
+				ID: "upload-" + name, Repository: name, StartedAt: testTime, LastChunkAt: testTime,
+			}); err != nil {
+				t.Errorf("CreateUpload(%q): %v", name, err)
+			}
+		})
+	}
+
+	// The entity is what has to exist, and what the refusal names: `ghost` is
+	// absent, so nothing under it can be written.
+	for _, name := range []string{"ghost", "ghost/api"} {
+		requireErrIs(t, s.PutManifest(ctx(), meta.Manifest{Repository: name, Digest: digest("no")}, nil),
+			meta.ErrNotFound, "PutManifest under the absent entity "+name)
+		requireErrIs(t, s.PutTag(ctx(), meta.Tag{Repository: name, Name: "v1", Digest: digest("no")}),
+			meta.ErrNotFound, "PutTag under the absent entity "+name)
+		requireErrIs(t, s.CreateUpload(ctx(), meta.UploadSession{ID: "u-" + name, Repository: name}),
+			meta.ErrNotFound, "CreateUpload under the absent entity "+name)
+	}
 }
 
 func testManifestRefs(t *testing.T, s meta.Store) {
@@ -825,7 +897,7 @@ func testTags(t *testing.T, s meta.Store) {
 }
 
 func testTagsRequireVisibility(t *testing.T, s meta.Store) {
-	mustCreateRepo(t, s, "secret/repo", meta.Hosted)
+	mustCreateRepo(t, s, "secret", meta.Hosted)
 	d := digest("hidden")
 	mustPutManifest(t, s, "secret/repo", d)
 	if err := s.PutTag(ctx(), meta.Tag{Repository: "secret/repo", Name: "v1", Digest: d}); err != nil {
@@ -849,6 +921,22 @@ func testTagsRequireVisibility(t *testing.T, s meta.Store) {
 
 	_, err = s.ListTags(ctx(), "ghost", meta.ListOptions{Visibility: meta.Unrestricted()})
 	requireErrIs(t, err, meta.ErrNotFound, "ListTags on a missing repository")
+
+	// A name inside a real entity that nobody has pushed to is absent, not an
+	// empty page: a typo must not come back looking like a repository that
+	// exists and happens to hold nothing.
+	_, err = s.ListTags(ctx(), "secret/typo", meta.ListOptions{Visibility: meta.Unrestricted()})
+	requireErrIs(t, err, meta.ErrNotFound, "ListTags on a name nobody pushed to")
+
+	// The entity itself is always a name the registry knows -- it is an
+	// endpoint whether or not anything is under it -- so it lists empty.
+	entityPage, err := s.ListTags(ctx(), "secret", meta.ListOptions{Visibility: meta.Unrestricted()})
+	if err != nil {
+		t.Fatalf("ListTags on the bare entity: %v", err)
+	}
+	if len(entityPage.Tags) != 0 {
+		t.Errorf("bare entity listed %d tags, want an empty page", len(entityPage.Tags))
+	}
 }
 
 func testTagsPaginate(t *testing.T, s meta.Store) {
@@ -889,6 +977,210 @@ func testTagsPaginate(t *testing.T, s meta.Store) {
 
 	if len(seen) != total {
 		t.Fatalf("stitched pages returned %d tags, want %d: %v", len(seen), total, seen)
+	}
+}
+
+// contentNames stitches every page of ListContentNames under one visibility,
+// asserting the properties that must hold on every page as it goes: no page
+// exceeds the limit, and no cursor names something the subject cannot see.
+func contentNames(t *testing.T, s meta.Store, vis meta.Visibility, limit int) []string {
+	t.Helper()
+
+	var (
+		seen   []string
+		cursor string
+	)
+	for pages := 0; ; pages++ {
+		if pages > 32 {
+			t.Fatal("content-name pagination did not terminate")
+		}
+		page, err := s.ListContentNames(ctx(), meta.ListOptions{
+			Visibility: vis, Limit: limit, Cursor: cursor,
+		})
+		if err != nil {
+			t.Fatalf("ListContentNames: %v", err)
+		}
+		if limit > 0 && len(page.Names) > limit {
+			t.Fatalf("page of %d names, want at most the limit of %d", len(page.Names), limit)
+		}
+		seen = append(seen, page.Names...)
+		if page.NextCursor == "" {
+			return seen
+		}
+		// The cursor is part of the response. One naming a hidden repository
+		// would disclose it as surely as listing it (ADR 0003).
+		if !vis.Allows(page.NextCursor) {
+			t.Fatalf("NextCursor %q names a repository the subject cannot see", page.NextCursor)
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// The catalog lists the names that hold content, and it lists them filtered.
+// A repository that exists but holds nothing names no endpoint to pull from,
+// so it is not content; a repository the subject cannot see is not listed at
+// all, and the filter runs in the query rather than over the answer.
+func testListContentNamesFiltersByVisibility(t *testing.T, s meta.Store) {
+	for _, name := range []string{"team-a/api", "team-a/web", "team-b/api"} {
+		mustSeedContent(t, s, name)
+	}
+	// An entity nobody has pushed to. It is a real endpoint and it is not a
+	// content name, which is the distinction this listing draws.
+	mustCreateRepo(t, s, "empty", meta.Hosted)
+
+	tests := []struct {
+		name       string
+		visibility meta.Visibility
+		want       []string
+	}{
+		{
+			// "empty" has a repository row and no manifests: it is not here.
+			name:       "unrestricted sees every name with content",
+			visibility: meta.Unrestricted(),
+			want:       []string{"team-a/api", "team-a/web", "team-b/api"},
+		},
+		{
+			name:       "prefix scope",
+			visibility: meta.VisibleTo(meta.ScopeFilter{Prefix: "team-a/"}),
+			want:       []string{"team-a/api", "team-a/web"},
+		},
+		{
+			name:       "exact scope",
+			visibility: meta.VisibleTo(meta.ScopeFilter{Exact: "team-b/api"}),
+			want:       []string{"team-b/api"},
+		},
+		{
+			// A subject with no bindings sees nothing. This is the case a nil
+			// filter slice would have turned into "everything".
+			name:       "no scopes sees nothing",
+			visibility: meta.VisibleTo(),
+			want:       nil,
+		},
+		{
+			name:       "zero value sees nothing",
+			visibility: meta.Visibility{},
+			want:       nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := contentNames(t, s, tt.visibility, 0)
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Fatalf("content names = %v, want %v in lexical order", got, tt.want)
+			}
+		})
+	}
+}
+
+// One name, however much content is under it, is one row. A catalog that
+// repeated a name once per manifest would page wrongly and would leak how much
+// is stored in a repository the subject can only list.
+func testListContentNamesAreDistinct(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "repo", meta.Hosted)
+
+	first := digest("distinct-one")
+	second := digest("distinct-two")
+	mustPutManifest(t, s, "repo", first)
+	mustPutManifest(t, s, "repo", second)
+	for _, name := range []string{"latest", "v1"} {
+		if err := s.PutTag(ctx(), meta.Tag{Repository: "repo", Name: name, Digest: first}); err != nil {
+			t.Fatalf("PutTag(%s): %v", name, err)
+		}
+	}
+
+	got := contentNames(t, s, meta.Unrestricted(), 0)
+	if len(got) != 1 || got[0] != "repo" {
+		t.Fatalf("content names = %v, want exactly one row for the one repository", got)
+	}
+
+	// Deleting one of two manifests leaves the name; deleting the last one
+	// takes it, because there is then nothing to pull.
+	if err := s.DeleteManifest(ctx(), "repo", first); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if got := contentNames(t, s, meta.Unrestricted(), 0); len(got) != 1 {
+		t.Fatalf("content names = %v, want the name to survive its first manifest", got)
+	}
+	if err := s.DeleteManifest(ctx(), "repo", second); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if got := contentNames(t, s, meta.Unrestricted(), 0); len(got) != 0 {
+		t.Fatalf("content names = %v, want none once the repository holds no content", got)
+	}
+}
+
+// Hidden names interleave with visible ones and sit at the page boundaries
+// themselves, so a store that fetched a page and filtered afterwards shows up
+// as a short page, a repeat, or a cursor naming something hidden -- the
+// count-and-pagination leak ADR 0003 forbids.
+func testListContentNamesPaginateUnderFiltering(t *testing.T, s meta.Store) {
+	visible := []string{"team-a/api", "team-a/web", "team-c/api", "team-c/cli", "team-c/web", "zz-solo"}
+	hidden := []string{"aaa-first", "team-ab/api", "team-b/api", "team-b/web", "zz-solo-2", "zzz-last"}
+	for _, name := range append(append([]string{}, visible...), hidden...) {
+		mustSeedContent(t, s, name)
+	}
+	vis := meta.VisibleTo(
+		meta.ScopeFilter{Prefix: "team-a/"},
+		meta.ScopeFilter{Prefix: "team-c/"},
+		meta.ScopeFilter{Exact: "zz-solo"},
+	)
+
+	got := contentNames(t, s, vis, 2)
+	if fmt.Sprint(got) != fmt.Sprint(visible) {
+		t.Fatalf("stitched pages = %v, want exactly the visible set %v", got, visible)
+	}
+}
+
+// Cursors are keyset, not offset (ADR 0015): content written behind the cursor
+// is not revisited and content written ahead of it appears, but a page walk
+// never repeats or skips what already existed.
+func testListContentNamesCursorIsStableUnderWrites(t *testing.T, s meta.Store) {
+	vis := meta.VisibleTo(
+		meta.ScopeFilter{Exact: "r-00"}, meta.ScopeFilter{Exact: "r-01"},
+		meta.ScopeFilter{Exact: "r-03"}, meta.ScopeFilter{Exact: "r-05"},
+		meta.ScopeFilter{Exact: "r-07"},
+	)
+	for i := 1; i <= 6; i++ {
+		name := fmt.Sprintf("r-%02d", i)
+		mustCreateRepo(t, s, name, meta.Hosted)
+		mustPutManifest(t, s, name, digest("cursor-"+name))
+	}
+
+	first, err := s.ListContentNames(ctx(), meta.ListOptions{Visibility: vis, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListContentNames: %v", err)
+	}
+	if len(first.Names) != 1 || first.Names[0] != "r-01" || first.NextCursor != "r-01" {
+		t.Fatalf("first page = %+v, want [r-01] with cursor r-01", first)
+	}
+
+	// Content lands mid-walk: a visible name behind the cursor, a hidden one
+	// between the remaining pages, and a visible one past the end.
+	for _, name := range []string{"r-00", "r-04x", "r-07"} {
+		mustCreateRepo(t, s, name, meta.Hosted)
+		mustPutManifest(t, s, name, digest("late-"+name))
+	}
+
+	seen := []string{first.Names[0]}
+	cursor := first.NextCursor
+	for pages := 0; cursor != ""; pages++ {
+		if pages > 8 {
+			t.Fatal("pagination did not terminate")
+		}
+		page, err := s.ListContentNames(ctx(), meta.ListOptions{Visibility: vis, Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListContentNames: %v", err)
+		}
+		seen = append(seen, page.Names...)
+		cursor = page.NextCursor
+	}
+
+	// r-00 was written behind the cursor, so this walk legitimately misses it;
+	// r-04x is not visible; r-07 was written ahead and appears.
+	want := []string{"r-01", "r-03", "r-05", "r-07"}
+	if fmt.Sprint(seen) != fmt.Sprint(want) {
+		t.Fatalf("stitched pages = %v, want %v: no repeats, no skips of what existed, nothing hidden", seen, want)
 	}
 }
 
@@ -1151,16 +1443,35 @@ func testPullStatsValidation(t *testing.T, s meta.Store) {
 	requireErrIs(t, err, meta.ErrNotFound, "GetPullStats after a rejected batch")
 }
 
+// Deleting an entity takes its content with it -- the name itself and every
+// name beneath it, since content is keyed by full name and the entity is the
+// only row that ever existed for it (ADR 0005). The deletion is immediate
+// (Q16): there is no trash can, and GC lag is the only grace window.
+//
+// The neighbour whose name merely starts the same way is the case that matters
+// most: `doomed-not-really/api` must survive `doomed` being deleted, and a
+// prefix match written as a LIKE or a plain HasPrefix would take it.
 func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 	mustCreateRepo(t, s, "doomed", meta.Hosted)
+	mustCreateRepo(t, s, "doomed-not-really", meta.Hosted)
 	mustCreateRepo(t, s, "survivor", meta.Hosted)
 	mustCreateRepo(t, s, "grp", meta.Group)
 
 	d := digest("content")
 	mustPutManifest(t, s, "doomed", d)
+	mustPutManifest(t, s, "doomed/inner", d)
+	mustPutManifest(t, s, "doomed/deep/nested", d)
+	mustPutManifest(t, s, "doomed-not-really/api", d)
 	mustPutManifest(t, s, "survivor", d)
-	if err := s.PutTag(ctx(), meta.Tag{Repository: "doomed", Name: "v1", Digest: d}); err != nil {
-		t.Fatalf("PutTag: %v", err)
+	for _, repo := range []string{"doomed", "doomed/inner", "doomed-not-really/api"} {
+		if err := s.PutTag(ctx(), meta.Tag{Repository: repo, Name: "v1", Digest: d}); err != nil {
+			t.Fatalf("PutTag(%q): %v", repo, err)
+		}
+	}
+	if err := s.CreateUpload(ctx(), meta.UploadSession{
+		ID: "upload-inner", Repository: "doomed/inner", StartedAt: testTime, LastChunkAt: testTime,
+	}); err != nil {
+		t.Fatalf("CreateUpload into a remainder: %v", err)
 	}
 	if err := s.SetGroupMembers(ctx(), "grp", []meta.GroupMember{
 		{Repository: "doomed", Position: 1},
@@ -1178,19 +1489,41 @@ func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 		t.Fatalf("DeleteRepository: %v", err)
 	}
 
-	if _, err := s.GetManifest(ctx(), "doomed", d); !errors.Is(err, meta.ErrNotFound) {
-		t.Errorf("manifest survived its repository: %v", err)
+	// Everything under the entity is gone: the bare name and every remainder.
+	for _, repo := range []string{"doomed", "doomed/inner", "doomed/deep/nested"} {
+		if _, err := s.GetManifest(ctx(), repo, d); !errors.Is(err, meta.ErrNotFound) {
+			t.Errorf("manifest in %q survived its entity: %v", repo, err)
+		}
+	}
+	for _, repo := range []string{"doomed", "doomed/inner"} {
+		if _, err := s.GetTag(ctx(), repo, "v1"); !errors.Is(err, meta.ErrNotFound) {
+			t.Errorf("tag in %q survived its entity: %v", repo, err)
+		}
 	}
 	// The identical digest in another repository is untouched: content is
 	// per repository.
 	if _, err := s.GetManifest(ctx(), "survivor", d); err != nil {
 		t.Errorf("deleting one repository removed another's manifest: %v", err)
 	}
+	// And the neighbour that merely shares the first characters of the name is
+	// a different entity entirely.
+	if _, err := s.GetManifest(ctx(), "doomed-not-really/api", d); err != nil {
+		t.Errorf("deleting %q reached a neighbouring entity's content: %v", "doomed", err)
+	}
+	if _, err := s.GetTag(ctx(), "doomed-not-really/api", "v1"); err != nil {
+		t.Errorf("deleting %q reached a neighbouring entity's tags: %v", "doomed", err)
+	}
+	if _, err := s.GetRepository(ctx(), "doomed-not-really"); err != nil {
+		t.Errorf("deleting %q reached a neighbouring entity's row: %v", "doomed", err)
+	}
 
 	// An upload session outliving its repository would pin its digest against
-	// garbage collection forever, and it can never be completed.
-	if _, err := s.GetUpload(ctx(), "upload-1"); !errors.Is(err, meta.ErrNotFound) {
-		t.Errorf("upload session survived its repository: %v", err)
+	// garbage collection forever, and it can never be completed -- including
+	// one opened against a name beneath the entity.
+	for _, id := range []string{"upload-1", "upload-inner"} {
+		if _, err := s.GetUpload(ctx(), id); !errors.Is(err, meta.ErrNotFound) {
+			t.Errorf("upload session %q survived its entity: %v", id, err)
+		}
 	}
 
 	// A group must not keep resolving to a repository that no longer exists.
@@ -1264,6 +1597,10 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"GetTag", func() error { _, err := s.GetTag(ctx, "repo", "t"); return err }},
 		{"ListTags", func() error {
 			_, err := s.ListTags(ctx, "repo", meta.ListOptions{Visibility: meta.Unrestricted()})
+			return err
+		}},
+		{"ListContentNames", func() error {
+			_, err := s.ListContentNames(ctx, meta.ListOptions{Visibility: meta.Unrestricted()})
 			return err
 		}},
 		{"DeleteTag", func() error { return s.DeleteTag(ctx, "repo", "t") }},

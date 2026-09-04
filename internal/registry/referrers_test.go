@@ -55,6 +55,10 @@ func referrersSeedIdentities(t *testing.T, s stack) {
 	for _, binding := range []meta.Binding{
 		{ID: "b-referrers-sam", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-sam",
 			Role: "referrers-reader", Scope: "team-a/*"},
+		// An entity that does not exist, so sam's refusal there comes from the
+		// handler resolving the name rather than from the guard.
+		{ID: "b-referrers-sam-ghost", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-sam",
+			Role: "referrers-reader", Scope: "ghost/*"},
 		{ID: "b-referrers-peek", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-peek",
 			Role: "referrers-peeker", Scope: "*"},
 	} {
@@ -332,8 +336,8 @@ func TestReferrersRefusals(t *testing.T) {
 			wantCode: http.StatusBadRequest, wantBody: registry.CodeDigestInvalid,
 		},
 		{
-			name:   "an absent repository is unknown",
-			target: "/v2/team-a/ghost/referrers/" + digest, as: "sam",
+			name:   "an absent entity is unknown",
+			target: "/v2/ghost/none/referrers/" + digest, as: "sam",
 			wantCode: http.StatusNotFound, wantBody: registry.CodeNameUnknown,
 		},
 		{

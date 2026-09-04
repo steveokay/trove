@@ -222,12 +222,14 @@ func TestTagsLinkOmitsUnrequestedPageSize(t *testing.T) {
 }
 
 // A repository with no tags is a 200 with an empty array, never null: clients
-// range over the field without checking it.
+// range over the field without checking it. The bare entity is the case that
+// exists before anything has been pushed -- a name the registry certainly
+// knows, holding nothing.
 func TestTagsEmptyRepositoryAnswersEmptyArray(t *testing.T) {
 	t.Parallel()
 
 	s := tagsStack(t)
-	rec := s.do(t, http.MethodGet, "/v2/team-a/mirror/tags/list", "rita", "")
+	rec := s.do(t, http.MethodGet, "/v2/mirror/tags/list", "rita", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET: %d %s", rec.Code, rec.Body)
 	}

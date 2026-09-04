@@ -45,10 +45,10 @@ type Tags struct {
 // repository, so it takes repo:read (ADR 0002's mapping) -- the same verb the
 // pull of any one of those tags would take.
 func (t *Tags) Register(r *server.Router) {
-	repo := func(req *http.Request) (authz.Resource, error) {
+	resource := func(req *http.Request) (authz.Resource, error) {
 		return authz.Repository(server.OCIName(req))
 	}
-	read := server.Permission{Verb: authz.RepoRead, Resource: repo}
+	read := server.Permission{Verb: authz.RepoRead, Resource: resource}
 
 	r.HandleOCI(http.MethodGet, "/tags/list", read, http.HandlerFunc(t.list))
 }

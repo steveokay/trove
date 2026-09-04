@@ -126,6 +126,23 @@ func AsTime(v sql.NullInt64) time.Time {
 	return time.UnixMilli(v.Int64).UTC()
 }
 
+// EntityContentRange returns the half-open bounds that select every content
+// name belonging to an entity *below* the entity itself: `team-a/api` and
+// `team-a/deep/name`, but not `team-a` and not `team-alpha/api`.
+//
+// It is a range rather than a LIKE for two reasons. `_` is a LIKE wildcard and
+// a legal repository-name character, so `LIKE 'team_a/%'` would also select
+// `teamXa/api` -- a delete that reaches another entity's content is exactly the
+// bug that must not exist. And a range comparison uses the ordering both
+// engines already agree on (the C collation on Postgres, byte order on
+// SQLite), which is the same ordering every cursor in this package depends on,
+// so it can run on the primary key rather than scanning.
+//
+// The upper bound is the prefix with '/' replaced by the next byte, '0'.
+func EntityContentRange(entity string) (low, high string) {
+	return entity + "/", entity + "0"
+}
+
 // Placeholder renders the parameter marker for the nth argument, counting from
 // one. It is the only piece of query syntax this package has to know about,
 // and the only reason the scope compiler cannot be a plain constant.

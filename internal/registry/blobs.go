@@ -12,6 +12,7 @@ import (
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/blob"
 	"github.com/steveokay/trove/internal/meta"
+	"github.com/steveokay/trove/internal/repo"
 	"github.com/steveokay/trove/internal/server"
 )
 
@@ -71,11 +72,11 @@ type Blobs struct {
 // pull routes repo:read (ADR 0002's mapping); the upload-status and cancel
 // routes are part of the push flow and share its verb.
 func (b *Blobs) Register(r *server.Router) {
-	repo := func(req *http.Request) (authz.Resource, error) {
+	resource := func(req *http.Request) (authz.Resource, error) {
 		return authz.Repository(server.OCIName(req))
 	}
-	read := server.Permission{Verb: authz.RepoRead, Resource: repo}
-	write := server.Permission{Verb: authz.RepoWrite, Resource: repo}
+	read := server.Permission{Verb: authz.RepoRead, Resource: resource}
+	write := server.Permission{Verb: authz.RepoWrite, Resource: resource}
 
 	r.HandleOCI(http.MethodHead, "/blobs/{digest}", read, http.HandlerFunc(b.stat))
 	r.HandleOCI(http.MethodGet, "/blobs/{digest}", read, http.HandlerFunc(b.get))
@@ -105,22 +106,56 @@ type repoGetter interface {
 	GetRepository(ctx context.Context, name string) (meta.Repository, error)
 }
 
-// hostedRepo resolves the request's repository for a client write. An absent
-// repository answers exactly like an unreadable one (the guard already turned
-// unreadable into this same 404), and a repository that is not hosted refuses
-// client writes unconditionally (ADR 0005).
-func hostedRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
+// routeToEntity resolves the request's OCI name to the repository entity that
+// serves it: the entity is mounted at the first path segment, so
+// /v2/team-a/api/blobs/... is served by `team-a` with the remainder `api`
+// (ADR 0005). The full name comes back with it, because the entity is routing
+// and the full name is identity -- it is what content is keyed by, what
+// bindings matched, and what events and catalogs record.
+//
+// An absent entity answers exactly like an unreadable one: the guard already
+// turned unreadable into this same 404, and writeError renders both, so the
+// two cannot drift apart (ADR 0003, Q18).
+func routeToEntity(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, meta.Repository, bool) {
 	name := server.OCIName(r)
-	repo, err := store.GetRepository(r.Context(), name)
+
+	entity, _, err := repo.Split(name)
+	if err != nil {
+		// Unreachable on a guarded route: the permission's resource extractor
+		// ran the same grammar before anything was decided, and an unusable
+		// name was refused there. It fails closed to the 404 anyway rather
+		// than routing on a name nothing validated.
+		server.Logger(r.Context(), log).Error("a request reached a handler with an unusable repository name",
+			"repo", name, "error", err)
+		writeError(w, http.StatusNotFound, CodeNameUnknown, "repository name not known to registry")
+		return "", meta.Repository{}, false
+	}
+
+	record, err := store.GetRepository(r.Context(), entity)
 	switch {
 	case errors.Is(err, meta.ErrNotFound):
 		writeError(w, http.StatusNotFound, CodeNameUnknown, "repository name not known to registry")
-		return "", false
+		return "", meta.Repository{}, false
 	case err != nil:
-		server.Logger(r.Context(), log).Error("read repository", "repo", name, "error", err)
+		server.Logger(r.Context(), log).Error("read repository", "repo", name, "entity", entity, "error", err)
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
+		return "", meta.Repository{}, false
+	}
+	return name, record, true
+}
+
+// hostedRepo resolves the request's repository for a client write, refusing
+// the types that do not take one.
+//
+// The refusal asks repo.Writable rather than comparing the type here, so the
+// rule that no configuration makes a proxy writable has one home: a second
+// spelling of it is a second chance to get it wrong (ADR 0005, §4).
+func hostedRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
+	name, record, ok := routeToEntity(w, r, store, log)
+	if !ok {
 		return "", false
-	case repo.Type != meta.Hosted:
+	}
+	if !repo.Writable(record.Type) {
 		writeError(w, http.StatusForbidden, CodeDenied, "repository does not accept client writes")
 		return "", false
 	}
@@ -129,18 +164,8 @@ func hostedRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *s
 
 // knownRepo resolves the request's repository for a read.
 func knownRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
-	name := server.OCIName(r)
-	_, err := store.GetRepository(r.Context(), name)
-	switch {
-	case errors.Is(err, meta.ErrNotFound):
-		writeError(w, http.StatusNotFound, CodeNameUnknown, "repository name not known to registry")
-		return "", false
-	case err != nil:
-		server.Logger(r.Context(), log).Error("read repository", "repo", name, "error", err)
-		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
-		return "", false
-	}
-	return name, true
+	name, _, ok := routeToEntity(w, r, store, log)
+	return name, ok
 }
 
 // parsedDigest validates a digest out of the request, refusing anything the

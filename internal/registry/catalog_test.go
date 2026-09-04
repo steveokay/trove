@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveokay/trove/internal/artifact"
 	"github.com/steveokay/trove/internal/meta"
 	metamem "github.com/steveokay/trove/internal/meta/memory"
 	"github.com/steveokay/trove/internal/registry"
@@ -67,7 +68,7 @@ func catalogBind(t *testing.T, s stack, principal string, scopes ...string) {
 	}
 }
 
-// catalogRepos creates repositories of the given type.
+// catalogRepos creates repositories of the given type, holding no content.
 func catalogRepos(t *testing.T, s stack, kind meta.RepositoryType, names ...string) {
 	t.Helper()
 
@@ -75,6 +76,33 @@ func catalogRepos(t *testing.T, s stack, kind meta.RepositoryType, names ...stri
 		if _, err := s.metaDB.CreateRepository(context.Background(),
 			meta.Repository{Name: name, Type: kind}); err != nil {
 			t.Fatalf("CreateRepository(%q): %v", name, err)
+		}
+	}
+}
+
+// catalogSeed puts one manifest under each full content name, creating the
+// entity that name is mounted under if nothing has yet. The catalog lists the
+// names content can be pulled from (ADR 0005), so seeding a catalog entry
+// means storing content -- and content needs its entity, never a row of its
+// own.
+func catalogSeed(t *testing.T, s stack, names ...string) {
+	t.Helper()
+
+	for _, name := range names {
+		entity, _, _ := strings.Cut(name, "/")
+		if _, err := s.metaDB.GetRepository(context.Background(), entity); errors.Is(err, meta.ErrNotFound) {
+			catalogRepos(t, s, meta.Hosted, entity)
+		}
+		payload := imageManifest(fmt.Sprintf(`"annotations": {"repo": %q}`, name))
+		if err := s.metaDB.PutManifest(context.Background(), meta.Manifest{
+			Repository: name,
+			Digest:     meta.Digest(manifestDigest(payload)),
+			MediaType:  artifact.MediaTypeOCIManifest,
+			Payload:    []byte(payload),
+			Size:       int64(len(payload)),
+			CreatedAt:  fixedTime,
+		}, nil); err != nil {
+			t.Fatalf("PutManifest(%q): %v", name, err)
 		}
 	}
 }
@@ -123,34 +151,42 @@ func catalogNextPage(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return target
 }
 
-// A scoped subject sees its subtree and nothing beside it. secret/vault is
-// readable by nobody in the fixture, so its absence here is the whole of
-// ADR 0003 surface 1 at the handler.
+// A scoped subject sees its subtree and nothing beside it. secret/vault holds
+// content and is readable by nobody in the fixture, so its absence here is the
+// whole of ADR 0003 surface 1 at the handler.
 func TestCatalogListsExactlyTheSubjectsScope(t *testing.T) {
 	t.Parallel()
 
 	s := catalogStack(t)
+	catalogSeed(t, s, "team-a/api", "secret/vault")
 	catalogLister(t, s, "catalog-scoped", "team-a/*")
 
 	got := catalogNames(t, s.do(t, http.MethodGet, "/v2/_catalog", "catalog-scoped", ""))
-	want := []string{"team-a/api", "team-a/mirror"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"team-a/api"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("catalog = %v, want %v in lexical order", got, want)
 	}
 }
 
-// Every repository type is a pullable endpoint, so every type is listed: the
-// hosted repository, the proxy, and a group. A catalog that showed only hosted
-// repositories would tell an operator their group endpoint does not exist.
-func TestCatalogListsEveryRepositoryType(t *testing.T) {
+// The catalog names what can be pulled, not what has been configured
+// (ADR 0005). A hosted repository enumerates its manifests; one holding
+// nothing names no endpoint and is absent, as are the types whose content
+// enumeration has not landed -- a proxy lists cached content only (C-004) and
+// a group the union of its readable members (C-012), and neither has any yet.
+func TestCatalogListsContentNotEntities(t *testing.T) {
 	t.Parallel()
 
 	s := catalogStack(t)
+	catalogSeed(t, s, "team-a/web")
+	// A configured hosted repository nobody has pushed to, a group, and the
+	// fixture's proxy: three endpoints, no content between them.
+	catalogRepos(t, s, meta.Hosted, "team-a/pending")
 	catalogRepos(t, s, meta.Group, "team-a/group")
+	catalogSeed(t, s, "team-a/api", "secret/vault")
 	catalogLister(t, s, "catalog-wide", "*")
 
 	got := catalogNames(t, s.do(t, http.MethodGet, "/v2/_catalog", "catalog-wide", ""))
-	want := []string{"secret/vault", "team-a/api", "team-a/group", "team-a/mirror"}
+	want := []string{"secret/vault", "team-a/api", "team-a/web"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("catalog = %v, want %v", got, want)
 	}
@@ -201,10 +237,12 @@ func TestCatalogAnonymousWithGrantsIsFiltered(t *testing.T) {
 	t.Parallel()
 
 	s := catalogStack(t)
+	catalogSeed(t, s, "team-a/api", "secret/vault")
+	catalogSeed(t, s, "team-a/web")
 	catalogBind(t, s, meta.AnonymousSubjectID, "team-a/*")
 
 	got := catalogNames(t, s.do(t, http.MethodGet, "/v2/_catalog", "", ""))
-	if len(got) != 2 || got[0] != "team-a/api" || got[1] != "team-a/mirror" {
+	if len(got) != 2 || got[0] != "team-a/api" || got[1] != "team-a/web" {
 		t.Fatalf("anonymous catalog = %v, want team-a/* alone", got)
 	}
 }
@@ -225,10 +263,10 @@ func TestCatalogPaginationNeverNamesAHiddenRepository(t *testing.T) {
 	for i := range visibleCount {
 		want = append(want, fmt.Sprintf("page/r%02d", i))
 	}
-	catalogRepos(t, s, meta.Hosted, want...)
+	catalogSeed(t, s, want...)
 	// With n=7 the pages break after r06, r13 and r20; a hidden repository
 	// sits immediately after each break and one more mid-page.
-	catalogRepos(t, s, meta.Hosted, "page/r03x", "page/r06x", "page/r13x", "page/r20x")
+	catalogSeed(t, s, "page/r03x", "page/r06x", "page/r13x", "page/r20x")
 
 	// Exact scopes, one per visible repository: a prefix scope could not
 	// interleave hidden names inside the visible range.
@@ -289,6 +327,8 @@ func TestCatalogRejectsABadPageSize(t *testing.T) {
 	t.Parallel()
 
 	s := catalogStack(t)
+	catalogSeed(t, s, "team-a/api")
+	catalogSeed(t, s, "team-a/web")
 	catalogLister(t, s, "catalog-sizer", "team-a/*")
 
 	// "%207" is a padded number: Atoi refuses it, and so must we -- accepting
@@ -320,8 +360,8 @@ type catalogFaultyMeta struct {
 
 var errCatalogDisk = errors.New("catalog store on fire")
 
-func (catalogFaultyMeta) ListRepositories(context.Context, meta.ListOptions) (meta.RepositoryPage, error) {
-	return meta.RepositoryPage{}, errCatalogDisk
+func (catalogFaultyMeta) ListContentNames(context.Context, meta.ListOptions) (meta.ContentNamePage, error) {
+	return meta.ContentNamePage{}, errCatalogDisk
 }
 
 // A store that cannot answer is a spec-shaped 500, never an empty catalog: an
@@ -380,6 +420,7 @@ func TestCatalogSurvivesADeadConnection(t *testing.T) {
 	t.Parallel()
 
 	s := catalogStack(t)
+	catalogSeed(t, s, "team-a/api")
 	catalogLister(t, s, "catalog-hangup", "team-a/*")
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/_catalog", nil)

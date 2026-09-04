@@ -62,12 +62,12 @@ type Manifests struct {
 // pushes repo:write; deletion is its own verb, never implied by write
 // (ADR 0002).
 func (m *Manifests) Register(r *server.Router) {
-	repo := func(req *http.Request) (authz.Resource, error) {
+	resource := func(req *http.Request) (authz.Resource, error) {
 		return authz.Repository(server.OCIName(req))
 	}
-	read := server.Permission{Verb: authz.RepoRead, Resource: repo}
-	write := server.Permission{Verb: authz.RepoWrite, Resource: repo}
-	del := server.Permission{Verb: authz.ManifestDelete, Resource: repo}
+	read := server.Permission{Verb: authz.RepoRead, Resource: resource}
+	write := server.Permission{Verb: authz.RepoWrite, Resource: resource}
+	del := server.Permission{Verb: authz.ManifestDelete, Resource: resource}
 
 	r.HandleOCI(http.MethodHead, "/manifests/{reference}", read, http.HandlerFunc(m.head))
 	r.HandleOCI(http.MethodGet, "/manifests/{reference}", read, http.HandlerFunc(m.get))

@@ -15,10 +15,10 @@ import (
 
 // CatalogMeta is the slice of the metadata store the catalog needs, declared
 // by the consumer (§11). It is one method, and that is the point: the catalog
-// can read repository names and nothing else, through a call that will not
-// compile without a Visibility.
+// can read the names that hold content and nothing else, through a call that
+// will not compile without a Visibility.
 type CatalogMeta interface {
-	ListRepositories(ctx context.Context, opts meta.ListOptions) (meta.RepositoryPage, error)
+	ListContentNames(ctx context.Context, opts meta.ListOptions) (meta.ContentNamePage, error)
 }
 
 // Catalog serves GET /v2/_catalog (R-004): the spec's list of repository
@@ -59,12 +59,24 @@ type catalogResponse struct {
 // is the http.Handler itself rather than a method Register wraps -- which
 // also means the fail-closed path below can be exercised directly.
 //
-// Every repository type is listed -- hosted, proxy, and group alike -- because
-// each is a pullable endpoint and the catalog names endpoints. ADR 0005's
-// per-type semantics (a proxy enumerates cached content only, a group the
-// union of its readable members) govern *content* enumeration and arrive with
-// the Phase 4 router; entities are exact names, so listing the visible
-// entities is the whole of the catalog until then.
+// What it lists is full OCI repository names that hold content, not repository
+// entities. An entity is mounted at the first path segment of a name, so the
+// entity `team-a` may hold `team-a/api` and `team-a/web`, and a client pulls
+// from the latter (ADR 0005). Listing entities would name endpoints that
+// resolve nothing, and would hide the ones that resolve something.
+//
+// ADR 0005 assembles that list per entity type, and only the hosted half of it
+// exists today:
+//
+//   - hosted entities enumerate their manifests, which is the query below;
+//   - proxies enumerate cached content only, never the upstream -- the cached
+//     tables do not exist yet (ADR 0009 keeps them a separate family), so a
+//     proxy contributes nothing here until C-004;
+//   - groups enumerate the union of the members their subject may read, which
+//     is C-012's permission-filtered resolution and contributes nothing yet.
+//
+// Both gaps are silence rather than a wrong answer: a name that cannot be
+// pulled from is not listed.
 func (c *Catalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	visibility, ok := server.VisibilityFrom(r.Context())
 	if !ok {
@@ -84,23 +96,22 @@ func (c *Catalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := c.Meta.ListRepositories(r.Context(), meta.ListOptions{
+	page, err := c.Meta.ListContentNames(r.Context(), meta.ListOptions{
 		Visibility: visibility,
 		Limit:      limit,
 		Cursor:     query.Get("last"),
 	})
 	if err != nil {
-		server.Logger(r.Context(), c.Log).Error("list repositories", "error", err)
+		server.Logger(r.Context(), c.Log).Error("list content names", "error", err)
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
 		return
 	}
 
-	names := make([]string, 0, len(page.Repositories))
-	for _, repo := range page.Repositories {
-		// The store ordered them; re-sorting here would be a second opinion
-		// about the order the cursor already encodes.
-		names = append(names, repo.Name)
-	}
+	// The store ordered them and the cursor encodes that order; re-sorting
+	// here would be a second opinion about it. The copy is only so an empty
+	// page marshals as `[]` rather than `null`.
+	names := make([]string, 0, len(page.Names))
+	names = append(names, page.Names...)
 	if page.NextCursor != "" {
 		w.Header().Set("Link", catalogNextLink(page.NextCursor, limit))
 	}

@@ -46,9 +46,17 @@ type RepositoryStore interface {
 	// repository carries the new version.
 	UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64) (Repository, error)
 
-	// DeleteRepository removes a repository and its group membership rows. It
-	// does not delete content: callers sequence that explicitly, because
-	// deleting hosted content is irreversible (ADR 0009).
+	// DeleteRepository removes a repository entity, its group membership rows,
+	// and every piece of content stored under it -- the name itself and every
+	// name beneath it, since `team-a` is the entity that holds `team-a/api`
+	// (ADR 0005). It all happens in one transaction: an entity that was half
+	// deleted would leave content nothing routes to.
+	//
+	// The deletion is immediate and irreversible for hosted content, which is
+	// the decision rather than an oversight (Q16): there is no trash can, and
+	// the lag before garbage collection reclaims the blobs is the only grace
+	// window. Confirming that an operator means it belongs to the admin API
+	// (C-016), not here.
 	DeleteRepository(ctx context.Context, name string) error
 
 	// SetGroupMembers replaces a group's ordered member list atomically.
@@ -61,10 +69,21 @@ type RepositoryStore interface {
 
 // ContentStore manages hosted manifests, tags, blobs, and upload sessions.
 // Nothing here touches cached proxy content.
+//
+// Content is keyed by the full OCI repository name, and the repository row it
+// belongs to is its *entity*: the first path segment of that name (ADR 0005).
+// Storing a manifest under `team-a/api` therefore requires the entity `team-a`
+// to exist, and nothing requires a row named `team-a/api` -- there is never one,
+// because an entity is a single path segment. Every write below says which of
+// the two it checks, and they all check the entity.
 type ContentStore interface {
 	// PutManifest stores a manifest and its reference edges in one
 	// transaction. The edges are what garbage collection walks, so a manifest
 	// that exists without them would be a blob-loss bug (ADR 0010).
+	//
+	// The manifest's entity must exist; ErrNotFound names the entity, not the
+	// content name, because the entity is what an operator would have to
+	// create.
 	PutManifest(ctx context.Context, m Manifest, refs []ManifestRef) error
 
 	// GetManifest returns one manifest by digest, or ErrNotFound.
@@ -91,15 +110,48 @@ type ContentStore interface {
 	// does not know the subject.
 	ListReferrers(ctx context.Context, repo string, subject Digest, artifactType string) ([]Manifest, error)
 
-	// PutTag creates or repoints a tag. The manifest must already exist.
+	// PutTag creates or repoints a tag. The tag's entity and the manifest it
+	// points at must both already exist.
 	PutTag(ctx context.Context, tag Tag) error
 
 	// GetTag resolves a tag to its manifest, or ErrNotFound.
 	GetTag(ctx context.Context, repo, name string) (Tag, error)
 
 	// ListTags returns a page of tags ordered by name. The repository itself
-	// must be visible to the caller.
+	// must be visible to the caller, and it must be a name this registry
+	// knows: its entity exists, and either the name *is* that entity or it
+	// holds content. A name nobody has ever pushed to is ErrNotFound rather
+	// than an empty page -- a typo must not come back looking like a real
+	// repository that happens to be empty, which is also what the distribution
+	// spec's NAME_UNKNOWN says.
+	//
+	// An invisible repository is ErrNotFound too, and deliberately the same
+	// answer: the two are indistinguishable (ADR 0003).
 	ListTags(ctx context.Context, repo string, opts ListOptions) (TagPage, error)
+
+	// ListContentNames returns a permission-filtered page of the distinct full
+	// OCI repository names that hold hosted content, ordered lexically and
+	// paginated by the same keyset cursor every listing uses (ADR 0015).
+	//
+	// It exists because a content name is not a repository entity. An entity
+	// is mounted at the first path segment of a name, so `team-a` is the
+	// entity and `team-a/api` is content inside it (ADR 0005); the catalog
+	// lists what can be pulled, which is the names with content, not the
+	// entities that route to them. ListRepositories answers the other
+	// question -- which entities exist -- and the two are deliberately
+	// separate methods rather than one with a flag.
+	//
+	// Only hosted content is enumerated, because only hosted content has rows
+	// here: cached proxy content lives in its own table family (ADR 0009) and
+	// joins this listing when that family exists, and a group contributes the
+	// union of the members its subject may read (C-012). Neither is reachable
+	// from this method, which is what keeps it a query over one table.
+	//
+	// The visibility is applied inside the query. A name the subject cannot
+	// see must not appear in a page, in a count, or in a NextCursor -- a
+	// cursor naming a hidden repository discloses it as surely as listing it
+	// would (ADR 0003).
+	ListContentNames(ctx context.Context, opts ListOptions) (ContentNamePage, error)
 
 	// DeleteTag removes one tag, leaving the manifest in place.
 	DeleteTag(ctx context.Context, repo, name string) error
@@ -115,7 +167,8 @@ type ContentStore interface {
 	// re-checking reachability inside the same transaction (ADR 0010).
 	DeleteBlob(ctx context.Context, digest Digest) error
 
-	// CreateUpload starts an upload session.
+	// CreateUpload starts an upload session. Its entity must exist: an upload
+	// into a repository that cannot be routed to could never be committed.
 	CreateUpload(ctx context.Context, session UploadSession) error
 
 	// GetUpload returns a session, or ErrNotFound.

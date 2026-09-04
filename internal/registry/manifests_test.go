@@ -375,15 +375,16 @@ func TestManifestReadUnknown(t *testing.T) {
 }
 
 // Proxy repositories refuse manifest writes and deletes by type (ADR 0005);
-// permission has nothing to do with it, so carol's write grant changes
-// nothing.
+// permission has nothing to do with it, so mona's grant on mirror/* changes
+// nothing. The refusal is the entity's: `mirror` is the proxy, and every name
+// routed through it is refused whatever its remainder.
 func TestManifestWritesRefusedOnProxy(t *testing.T) {
 	t.Parallel()
 
 	s := newStack(t)
 	for _, tt := range []struct{ method, target, body string }{
-		{http.MethodPut, "/v2/team-a/mirror/manifests/v1", imageManifest()},
-		{http.MethodDelete, "/v2/team-a/mirror/manifests/" + manifestDigest(imageManifest()), ""},
+		{http.MethodPut, "/v2/mirror/library/nginx/manifests/v1", imageManifest()},
+		{http.MethodDelete, "/v2/mirror/library/nginx/manifests/" + manifestDigest(imageManifest()), ""},
 	} {
 		rec := s.do(t, tt.method, tt.target, "mona", tt.body, "Content-Type", artifact.MediaTypeOCIManifest)
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), registry.CodeDenied) {

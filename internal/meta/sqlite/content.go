@@ -9,9 +9,37 @@ import (
 
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/sqlutil"
+	"github.com/steveokay/trove/internal/reponame"
 )
 
 const manifestColumns = `repo_name, digest, media_type, artifact_type, subject_digest, payload, size, created_at`
+
+// requireEntity checks that the entity a content name belongs to exists. It is
+// the code-side replacement for the foreign key 0004 dropped: content is keyed
+// by full name, and the row it needs is its first path segment (ADR 0005). The
+// error names the entity, because the entity is what an operator would create.
+func (s *Store) requireEntity(ctx context.Context, q sqlutil.Querier, name string) error {
+	entity := reponame.Prefix(name)
+	_, err := s.repository(ctx, q, entity)
+	return err
+}
+
+// knownContentName reports whether the registry can answer for a name at all:
+// its entity exists, and the name is either that entity or holds content. A
+// name nobody pushed to is absent rather than empty (ADR 0005).
+func (s *Store) knownContentName(ctx context.Context, q sqlutil.Querier, name string) (bool, error) {
+	entity := reponame.Prefix(name)
+	if _, err := s.repository(ctx, q, entity); err != nil {
+		if errors.Is(err, meta.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if name == entity {
+		return true, nil
+	}
+	return sqlutil.Exists(ctx, q, `SELECT 1 FROM manifests WHERE repo_name = ? LIMIT 1`, name)
+}
 
 func scanManifest(sc sqlutil.Scanner) (meta.Manifest, error) {
 	var (
@@ -51,7 +79,7 @@ func (s *Store) PutManifest(ctx context.Context, m meta.Manifest, refs []meta.Ma
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		if _, err := s.repository(ctx, tx, m.Repository); err != nil {
+		if err := s.requireEntity(ctx, tx, m.Repository); err != nil {
 			return err
 		}
 		if _, err := sqlutil.Execute(ctx, tx,
@@ -218,7 +246,7 @@ func (s *Store) PutTag(ctx context.Context, tag meta.Tag) error {
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		if _, err := s.repository(ctx, tx, tag.Repository); err != nil {
+		if err := s.requireEntity(ctx, tx, tag.Repository); err != nil {
 			return err
 		}
 		if _, err := s.manifest(ctx, tx, tag.Repository, tag.Digest); err != nil {
@@ -272,16 +300,18 @@ func scanTag(sc sqlutil.Scanner) (meta.Tag, error) {
 	return tag, nil
 }
 
-// ListTags returns a page of tags ordered by name. An invisible repository is
-// indistinguishable from a missing one (ADR 0003).
+// ListTags returns a page of tags ordered by name. A name the registry does
+// not know and one the caller cannot see are the same answer, and it is the
+// same answer an absent repository gets (ADR 0003).
 func (s *Store) ListTags(ctx context.Context, repo string, opts meta.ListOptions) (meta.TagPage, error) {
 	if err := s.ready(ctx); err != nil {
 		return meta.TagPage{}, err
 	}
-	if _, err := s.repository(ctx, s.db, repo); err != nil {
+	known, err := s.knownContentName(ctx, s.db, repo)
+	if err != nil {
 		return meta.TagPage{}, err
 	}
-	if !opts.Visibility.Allows(repo) {
+	if !known || !opts.Visibility.Allows(repo) {
 		return meta.TagPage{}, meta.NotFound("repository", repo)
 	}
 
@@ -299,6 +329,39 @@ func (s *Store) ListTags(ctx context.Context, repo string, opts meta.ListOptions
 	if len(tags) > limit {
 		page.Tags = tags[:limit]
 		page.NextCursor = tags[limit-1].Name
+	}
+	return page, nil
+}
+
+// ListContentNames returns a permission-filtered page of the distinct
+// repository names that hold manifests, ordered lexically. DISTINCT is the
+// whole of the per-name collapse: two tags or twenty manifests under one name
+// are one row, because the catalog names endpoints rather than counting them.
+func (s *Store) ListContentNames(ctx context.Context, opts meta.ListOptions) (meta.ContentNamePage, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.ContentNamePage{}, err
+	}
+
+	where, args := sqlutil.VisibilityClause("repo_name", opts.Visibility, sqlutil.Question, 1)
+	limit := opts.EffectiveLimit()
+	args = append(args, opts.Cursor, limit+1)
+
+	names, err := sqlutil.Collect(ctx, s.db,
+		`SELECT DISTINCT repo_name FROM manifests
+		 WHERE `+where+` AND repo_name > ? ORDER BY repo_name LIMIT ?`,
+		args,
+		func(rows *sql.Rows) (string, error) {
+			var name string
+			return name, rows.Scan(&name)
+		})
+	if err != nil {
+		return meta.ContentNamePage{}, err
+	}
+
+	page := meta.ContentNamePage{Names: names}
+	if len(names) > limit {
+		page.Names = names[:limit]
+		page.NextCursor = names[limit-1]
 	}
 	return page, nil
 }
@@ -392,7 +455,7 @@ func (s *Store) CreateUpload(ctx context.Context, session meta.UploadSession) er
 	}
 
 	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		if _, err := s.repository(ctx, tx, session.Repository); err != nil {
+		if err := s.requireEntity(ctx, tx, session.Repository); err != nil {
 			return err
 		}
 		taken, err := sqlutil.Exists(ctx, tx, `SELECT 1 FROM upload_sessions WHERE id = ?`, session.ID)

@@ -11,11 +11,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveokay/trove/internal/meta"
+	"github.com/steveokay/trove/internal/reponame"
 )
+
+// entityOf returns the repository entity a content name belongs to: its first
+// path segment (ADR 0005). The grammar lives in reponame so the store, the
+// router, and the binding matcher cannot disagree about where a name divides.
+func entityOf(name string) string { return reponame.Prefix(name) }
+
+// belongsTo reports whether a content name is stored under an entity: the
+// entity itself, or a name beneath it. `team-alpha/api` does not belong to
+// `team-a`, which is the case a naive prefix check gets wrong.
+func belongsTo(name, entity string) bool {
+	return name == entity || strings.HasPrefix(name, entity+"/")
+}
 
 // Store is an in-memory meta.Store.
 type Store struct {
@@ -243,14 +257,27 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 
 	delete(s.repos, name)
 	delete(s.members, name)
-	delete(s.manifests, name)
-	delete(s.refs, name)
-	delete(s.tags, name)
+
+	// Content is keyed by full name, so an entity's content is the name itself
+	// and everything beneath it (ADR 0005). belongsTo is what keeps this from
+	// reaching `team-alpha/api` while deleting `team-a`.
+	for content := range s.manifests {
+		if belongsTo(content, name) {
+			delete(s.manifests, content)
+			delete(s.refs, content)
+			delete(s.tags, content)
+		}
+	}
+	for content := range s.tags {
+		if belongsTo(content, name) {
+			delete(s.tags, content)
+		}
+	}
 
 	// An upload into a repository that no longer exists can never complete,
 	// and while it survives it pins its digest against garbage collection.
 	for id, session := range s.uploads {
-		if session.Repository == name {
+		if belongsTo(session.Repository, name) {
 			delete(s.uploads, id)
 		}
 	}
@@ -341,6 +368,24 @@ func (s *Store) ListGroupMembers(ctx context.Context, group string) ([]meta.Grou
 	return out, nil
 }
 
+// repoExists reports whether a repository entity is stored. Callers hold the
+// lock.
+func (s *Store) repoExists(entity string) bool {
+	_, ok := s.repos[entity]
+	return ok
+}
+
+// knownContentName reports whether a name is one this registry can answer for:
+// its entity exists, and the name is either that entity or holds content.
+// Callers hold the lock.
+func (s *Store) knownContentName(name string) bool {
+	entity := entityOf(name)
+	if !s.repoExists(entity) {
+		return false
+	}
+	return name == entity || len(s.manifests[name]) > 0
+}
+
 // --- content ---
 
 // PutManifest stores a manifest and its reference edges together.
@@ -355,8 +400,8 @@ func (s *Store) PutManifest(ctx context.Context, m meta.Manifest, refs []meta.Ma
 		return err
 	}
 
-	if _, ok := s.repos[m.Repository]; !ok {
-		return meta.NotFound("repository", m.Repository)
+	if entity := entityOf(m.Repository); !s.repoExists(entity) {
+		return meta.NotFound("repository", entity)
 	}
 	if m.Digest == "" {
 		return meta.Invalid("digest", "must not be empty")
@@ -537,8 +582,8 @@ func (s *Store) PutTag(ctx context.Context, tag meta.Tag) error {
 	if tag.Name == "" {
 		return meta.Invalid("name", "must not be empty")
 	}
-	if _, ok := s.repos[tag.Repository]; !ok {
-		return meta.NotFound("repository", tag.Repository)
+	if entity := entityOf(tag.Repository); !s.repoExists(entity) {
+		return meta.NotFound("repository", entity)
 	}
 	if _, ok := s.manifests[tag.Repository][tag.Digest]; !ok {
 		return meta.NotFound("manifest", string(tag.Digest))
@@ -585,12 +630,11 @@ func (s *Store) ListTags(ctx context.Context, repo string, opts meta.ListOptions
 		return meta.TagPage{}, err
 	}
 
-	if _, ok := s.repos[repo]; !ok {
-		return meta.TagPage{}, meta.NotFound("repository", repo)
-	}
-	// The repository itself must be visible; an invisible repository has no
-	// tags as far as the caller is concerned.
-	if !opts.Visibility.Allows(repo) {
+	// The name must be one this registry knows -- its entity, or a name that
+	// holds content -- and it must be visible. All three failures are the same
+	// answer: an invisible repository is indistinguishable from an absent one
+	// (ADR 0003), and a name nobody pushed to is absent rather than empty.
+	if !s.knownContentName(repo) || !opts.Visibility.Allows(repo) {
 		return meta.TagPage{}, meta.NotFound("repository", repo)
 	}
 
@@ -610,6 +654,46 @@ func (s *Store) ListTags(ctx context.Context, repo string, opts meta.ListOptions
 			break
 		}
 		page.Tags = append(page.Tags, s.tags[repo][name])
+	}
+	return page, nil
+}
+
+// ListContentNames returns a permission-filtered page of the distinct names
+// that hold content, ordered lexically.
+func (s *Store) ListContentNames(ctx context.Context, opts meta.ListOptions) (meta.ContentNamePage, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.ContentNamePage{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.ContentNamePage{}, err
+	}
+
+	names := make([]string, 0, len(s.manifests))
+	for name, manifests := range s.manifests {
+		// An emptied map is a repository whose last manifest was deleted: it
+		// holds no content, so it names nothing to pull and is not listed.
+		if len(manifests) == 0 {
+			continue
+		}
+		// Filtering happens here, while building the result set -- never
+		// after (ADR 0003). Counts and cursors must reflect the filter.
+		if opts.Visibility.Allows(name) && name > opts.Cursor {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	limit := opts.EffectiveLimit()
+	page := meta.ContentNamePage{}
+	for i, name := range names {
+		if i == limit {
+			page.NextCursor = names[i-1]
+			break
+		}
+		page.Names = append(page.Names, name)
 	}
 	return page, nil
 }
@@ -711,8 +795,8 @@ func (s *Store) CreateUpload(ctx context.Context, session meta.UploadSession) er
 	if session.ID == "" {
 		return meta.Invalid("id", "must not be empty")
 	}
-	if _, ok := s.repos[session.Repository]; !ok {
-		return meta.NotFound("repository", session.Repository)
+	if entity := entityOf(session.Repository); !s.repoExists(entity) {
+		return meta.NotFound("repository", entity)
 	}
 	if _, exists := s.uploads[session.ID]; exists {
 		return meta.Conflict("upload", session.ID)

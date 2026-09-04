@@ -36,7 +36,11 @@ import (
 
 const (
 	benchSubject = "carol"
-	benchRepo    = "team-a/api"
+	// The entity the pushes route to, and the full name they push under: an
+	// entity is one path segment and content is keyed by the whole name
+	// (ADR 0005), so the benchmark measures the real two-part resolution.
+	benchEntity = "team-a"
+	benchRepo   = "team-a/api"
 
 	benchKiB = 1 << 10
 	benchMiB = 1 << 20
@@ -68,7 +72,7 @@ func benchNewStack(b *testing.B) benchStack {
 	if err := metaDB.CreateSubject(ctx, meta.Subject{ID: "u-carol", Kind: meta.User, Name: benchSubject}); err != nil {
 		b.Fatalf("CreateSubject: %v", err)
 	}
-	if _, err := metaDB.CreateRepository(ctx, meta.Repository{Name: benchRepo, Type: meta.Hosted}); err != nil {
+	if _, err := metaDB.CreateRepository(ctx, meta.Repository{Name: benchEntity, Type: meta.Hosted}); err != nil {
 		b.Fatalf("CreateRepository: %v", err)
 	}
 	if err := metaDB.CreateRole(ctx, meta.Role{Name: "publisher", Verbs: []string{"repo:read", "repo:write"}}); err != nil {

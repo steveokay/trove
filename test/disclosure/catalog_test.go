@@ -60,10 +60,27 @@ func catalogNewFixture(t *testing.T) catalogFixture {
 	}); err != nil {
 		t.Fatalf("CreateRole: %v", err)
 	}
+	// One entity, mounted at the first path segment, holding every name below
+	// (ADR 0005). Visible and hidden alike route through it, so nothing here
+	// can pass by being unroutable rather than unreadable.
+	if _, err := store.CreateRepository(ctx, meta.Repository{Name: "team-a", Type: meta.Hosted}); err != nil {
+		t.Fatalf("CreateRepository(team-a): %v", err)
+	}
 	for i, name := range catalogVisible {
 		for _, repo := range []string{name, name + catalogHiddenSuffix} {
-			if _, err := store.CreateRepository(ctx, meta.Repository{Name: repo, Type: meta.Hosted}); err != nil {
-				t.Fatalf("CreateRepository(%q): %v", repo, err)
+			// The catalog lists the names content can be pulled from, not the
+			// repositories an operator configured (ADR 0005), so every name
+			// here -- hidden ones included -- holds a manifest. A hidden name
+			// with nothing in it would be filtered out by having no content
+			// rather than by the visibility, and the test would prove nothing.
+			if err := store.PutManifest(ctx, meta.Manifest{
+				Repository: repo,
+				Digest:     meta.Digest(fmt.Sprintf("sha256:%064x", i*2+len(repo))),
+				MediaType:  "application/vnd.oci.image.manifest.v1+json",
+				Payload:    []byte(`{"schemaVersion":2}`),
+				Size:       19,
+			}, nil); err != nil {
+				t.Fatalf("PutManifest(%q): %v", repo, err)
 			}
 		}
 		// One exact-scope binding per visible repository. A prefix scope would
