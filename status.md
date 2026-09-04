@@ -118,7 +118,7 @@ Detailed specs (files, test plans): `docs/plan/phase-3-registry-core.md`
 | R-008 | Spec error-code mapping | review | R-002 ✓, D-019 ✓ | 24 goldens pin the /v2/ wire contract byte-for-byte (`internal/registry/testdata/errors/`): every `SpecErrors` renderer branch (incl. the empty-challenge and Retry-After-floor branches), one envelope per `Code*` constant, and the JSON HTML-escaping nobody chose but clients now depend on. An AST-driven ratchet means a new code cannot ship unpinned; zero rendered bytes changed. Details → `docs/notes/phase-3.md` |
 | R-009 | OCI conformance suite in CI | todo | R-001..R-008 | Green, required for merge; pull-side conformance also run against a group endpoint |
 | R-010 | Pull statistics: last-pulled + counts | todo | R-002 | Recorded off the hot path; feeds retention rules |
-| R-011 | Stale upload-session reaping | todo | R-001 | Incomplete chunked uploads expire after a configurable TTL; storage reclaimed; active uploads untouched |
+| R-011 | Stale upload-session reaping | review | R-001 ✓ | `internal/registry/upload_reaper.go` + `registry.upload_session_ttl` (default 24h) + serve's interim hourly loop (P-006 replaces the loop, keeps `ReapOnce`). Staging cancelled before the row so every crash window self-heals; activity refreshes the clock so active uploads are structurally unreachable; committed blobs untouched by construction and by test; per-session failures logged, joined, and never stop the sweep. Details → `docs/notes/phase-3.md` |
 | R-012 | Push-latency benchmark | todo | R-001, R-002 | Baseline recorded; regression check in CI; push latency unaffected by scan backlog (with S-003) |
 
 ---

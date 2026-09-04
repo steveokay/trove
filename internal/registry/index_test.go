@@ -314,7 +314,7 @@ func TestIndexPlatformRoundTrip(t *testing.T) {
 					Platform json.RawMessage `json:"platform"`
 				} `json:"manifests"`
 			}
-			if err := json.Unmarshal([]byte(indexGet(t, s, tag).Body.String()), &served); err != nil {
+			if err := json.Unmarshal(indexGet(t, s, tag).Body.Bytes(), &served); err != nil {
 				t.Fatalf("unmarshal served index: %v", err)
 			}
 			if len(served.Manifests) != 1 || served.Manifests[0].Digest != tt.childDg {

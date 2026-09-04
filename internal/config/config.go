@@ -101,6 +101,10 @@ type Registry struct {
 	// MaxManifestBytes caps a pushed manifest payload (R-002). Real manifests
 	// are kilobytes; the cap keeps an adversarial payload out of memory.
 	MaxManifestBytes Bytes `yaml:"max_manifest_bytes"`
+	// UploadSessionTTL is how long an upload session may sit idle before the
+	// reaper reclaims its row and staged bytes (R-011). Activity refreshes
+	// it; an active upload is never reaped.
+	UploadSessionTTL Duration `yaml:"upload_session_ttl"`
 }
 
 // Cache configures proxy cache semantics (ADR 0008).
@@ -187,6 +191,7 @@ func Defaults() Config {
 		},
 		Registry: Registry{
 			MaxManifestBytes: 4 * 1024 * 1024,
+			UploadSessionTTL: Duration(24 * time.Hour),
 		},
 		Cache: Cache{
 			Budget:      50 * gigabyte,

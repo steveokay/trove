@@ -160,6 +160,7 @@ built from.
 | `webhooks.allow_private_targets` | `false` | A webhook target is an outbound request you control the URL of; private ranges are refused so subscriptions cannot probe your network. |
 | `storage.s3.redirect` | `false` | Presigned redirects take trove out of the data path, skipping read-side digest verification. |
 | `registry.max_manifest_bytes` | `4MiB` | Real manifests are kilobytes; the cap keeps an adversarial manifest payload out of memory. Pushes over it are refused with `MANIFEST_INVALID`. |
+| `registry.upload_session_ttl` | `24h` | An interrupted push holds a session row and staged bytes; after this long idle the reaper reclaims both. Any chunk resets the clock, so an active upload is never reaped. |
 | `scan.concurrency` | `1` | Scanning is memory-hungry; the safe default is one at a time. |
 
 ## Related

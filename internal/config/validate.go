@@ -80,6 +80,7 @@ func (c *Config) validate(sources *sourceMap) error {
 	}
 
 	v.positiveBytes("registry.max_manifest_bytes", c.Registry.MaxManifestBytes)
+	v.positive("registry.upload_session_ttl", c.Registry.UploadSessionTTL)
 
 	v.nonNegativeBytes("cache.budget", c.Cache.Budget)
 	v.nonNegative("cache.tag_ttl", c.Cache.TagTTL)

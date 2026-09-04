@@ -91,9 +91,30 @@ func runServe(ctx context.Context, env Env, args []string) error {
 		return fmt.Errorf("open blob storage: %w", err)
 	}
 
+	// The interim reaper loop (R-011): same store values the handlers got, so
+	// it cannot be pointed at a cache root (ADR 0009). Hourly is 1/24 of the
+	// default TTL; P-006's scheduler replaces the loop, keeping ReapOnce.
+	reaper := &registry.UploadReaper{
+		Meta:  store,
+		Store: hosted,
+		TTL:   time.Duration(cfg.Registry.UploadSessionTTL),
+		Log:   log,
+	}
+	reapCtx, stopReaper := context.WithCancel(ctx)
+	reaperDone := make(chan struct{})
+	go func() {
+		defer close(reaperDone)
+		reaper.Run(reapCtx, time.Hour)
+	}()
+
 	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, cfg.Server.ExternalURL,
 		int64(cfg.Registry.MaxManifestBytes), log))
-	if err := srv.Run(ctx); err != nil {
+	err = srv.Run(ctx)
+	// Stop the reaper after the listener is down and wait it out, so shutdown
+	// never races a sweep mid-delete.
+	stopReaper()
+	<-reaperDone
+	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
