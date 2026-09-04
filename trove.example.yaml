@@ -52,6 +52,11 @@ storage:
     # also skips our read-side digest verification. Off unless you accept that.
     redirect: false
 
+registry:
+  # Largest manifest payload a push may carry. Real manifests are kilobytes;
+  # the cap keeps an adversarial payload out of memory.
+  max_manifest_bytes: 4MiB
+
 cache:
   # Total size of proxied content kept on disk. Eviction is LRU and never
   # fails a pull: a breach evicts harder rather than blocking the cluster.

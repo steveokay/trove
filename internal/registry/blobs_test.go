@@ -39,6 +39,7 @@ func newStack(t *testing.T) stack {
 	for _, subject := range []meta.Subject{
 		{ID: "u-carol", Kind: meta.User, Name: "carol"},
 		{ID: "u-rita", Kind: meta.User, Name: "rita"},
+		{ID: "u-mona", Kind: meta.User, Name: "mona"},
 	} {
 		if err := metaDB.CreateSubject(ctx, subject); err != nil {
 			t.Fatalf("CreateSubject: %v", err)
@@ -56,6 +57,7 @@ func newStack(t *testing.T) stack {
 	for _, role := range []meta.Role{
 		{Name: "publisher", Verbs: []string{"repo:read", "repo:write"}},
 		{Name: "reader", Verbs: []string{"repo:read"}},
+		{Name: "maintainer", Verbs: []string{"repo:read", "repo:write", "manifest:delete"}},
 	} {
 		if err := metaDB.CreateRole(ctx, role); err != nil {
 			t.Fatalf("CreateRole: %v", err)
@@ -64,6 +66,7 @@ func newStack(t *testing.T) stack {
 	for _, binding := range []meta.Binding{
 		{ID: "b-carol", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "team-a/*"},
 		{ID: "b-rita", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "team-a/*"},
+		{ID: "b-mona", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-mona", Role: "maintainer", Scope: "team-a/*"},
 	} {
 		if err := metaDB.CreateBinding(ctx, binding); err != nil {
 			t.Fatalf("CreateBinding: %v", err)
@@ -85,6 +88,7 @@ func newStack(t *testing.T) stack {
 		Now:      func() time.Time { return fixedTime },
 	}
 	handlers.Register(router)
+	(&registry.Manifests{Meta: metaDB, Now: func() time.Time { return fixedTime }}).Register(router)
 	return stack{handler: router, metaDB: metaDB, blobs: blobs}
 }
 

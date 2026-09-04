@@ -20,6 +20,7 @@ type Config struct {
 	TLS      TLS      `yaml:"tls"`
 	Database Database `yaml:"database"`
 	Storage  Storage  `yaml:"storage"`
+	Registry Registry `yaml:"registry"`
 	Cache    Cache    `yaml:"cache"`
 	Auth     Auth     `yaml:"auth"`
 	Scan     Scan     `yaml:"scan"`
@@ -93,6 +94,13 @@ type StorageS3 struct {
 	// Redirect serves reads as presigned URLs. Off by default: a redirect
 	// bypasses our read-side digest verification (ADR 0007).
 	Redirect bool `yaml:"redirect"`
+}
+
+// Registry configures the OCI distribution API.
+type Registry struct {
+	// MaxManifestBytes caps a pushed manifest payload (R-002). Real manifests
+	// are kilobytes; the cap keeps an adversarial payload out of memory.
+	MaxManifestBytes Bytes `yaml:"max_manifest_bytes"`
 }
 
 // Cache configures proxy cache semantics (ADR 0008).
@@ -176,6 +184,9 @@ func Defaults() Config {
 		Storage: Storage{
 			Driver: "fs",
 			S3:     StorageS3{UseSSL: true},
+		},
+		Registry: Registry{
+			MaxManifestBytes: 4 * 1024 * 1024,
 		},
 		Cache: Cache{
 			Budget:      50 * gigabyte,

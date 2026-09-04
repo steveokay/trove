@@ -100,38 +100,43 @@ func (b *Blobs) quota() QuotaChecker {
 	return b.Quota
 }
 
-// hostedRepo resolves the request's repository for a write. An absent
+// repoGetter is the one store method repository resolution needs.
+type repoGetter interface {
+	GetRepository(ctx context.Context, name string) (meta.Repository, error)
+}
+
+// hostedRepo resolves the request's repository for a client write. An absent
 // repository answers exactly like an unreadable one (the guard already turned
 // unreadable into this same 404), and a repository that is not hosted refuses
-// pushes unconditionally (ADR 0005).
-func (b *Blobs) hostedRepo(w http.ResponseWriter, r *http.Request) (string, bool) {
+// client writes unconditionally (ADR 0005).
+func hostedRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
 	name := server.OCIName(r)
-	repo, err := b.Meta.GetRepository(r.Context(), name)
+	repo, err := store.GetRepository(r.Context(), name)
 	switch {
 	case errors.Is(err, meta.ErrNotFound):
 		writeError(w, http.StatusNotFound, CodeNameUnknown, "repository name not known to registry")
 		return "", false
 	case err != nil:
-		server.Logger(r.Context(), b.Log).Error("read repository", "repo", name, "error", err)
+		server.Logger(r.Context(), log).Error("read repository", "repo", name, "error", err)
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
 		return "", false
 	case repo.Type != meta.Hosted:
-		writeError(w, http.StatusForbidden, CodeDenied, "repository does not accept pushes")
+		writeError(w, http.StatusForbidden, CodeDenied, "repository does not accept client writes")
 		return "", false
 	}
 	return name, true
 }
 
 // knownRepo resolves the request's repository for a read.
-func (b *Blobs) knownRepo(w http.ResponseWriter, r *http.Request) (string, bool) {
+func knownRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
 	name := server.OCIName(r)
-	_, err := b.Meta.GetRepository(r.Context(), name)
+	_, err := store.GetRepository(r.Context(), name)
 	switch {
 	case errors.Is(err, meta.ErrNotFound):
 		writeError(w, http.StatusNotFound, CodeNameUnknown, "repository name not known to registry")
 		return "", false
 	case err != nil:
-		server.Logger(r.Context(), b.Log).Error("read repository", "repo", name, "error", err)
+		server.Logger(r.Context(), log).Error("read repository", "repo", name, "error", err)
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
 		return "", false
 	}
@@ -151,7 +156,7 @@ func parsedDigest(w http.ResponseWriter, raw string) (blob.Digest, bool) {
 
 // stat serves HEAD /v2/<name>/blobs/<digest>.
 func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.knownRepo(w, r); !ok {
+	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
 		return
 	}
 	digest, ok := parsedDigest(w, server.OCIValue(r, "digest"))
@@ -178,7 +183,7 @@ func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
 // reader: corrupt content ends the stream short instead of arriving with a
 // clean EOF (ADR 0007).
 func (b *Blobs) get(w http.ResponseWriter, r *http.Request) {
-	if _, ok := b.knownRepo(w, r); !ok {
+	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
 		return
 	}
 	digest, ok := parsedDigest(w, server.OCIValue(r, "digest"))

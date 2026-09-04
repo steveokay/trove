@@ -15,17 +15,20 @@ import (
 // codes are contract (§11); R-008 pins them with golden files across every
 // route.
 const (
-	CodeBlobUnknown       = "BLOB_UNKNOWN"
-	CodeBlobUploadInvalid = "BLOB_UPLOAD_INVALID"
-	CodeBlobUploadUnknown = "BLOB_UPLOAD_UNKNOWN"
-	CodeDigestInvalid     = "DIGEST_INVALID"
-	CodeNameInvalid       = "NAME_INVALID"
-	CodeNameUnknown       = "NAME_UNKNOWN"
-	CodeDenied            = "DENIED"
-	CodeUnauthorized      = "UNAUTHORIZED"
-	CodeUnsupported       = "UNSUPPORTED"
-	CodeTooManyRequests   = "TOOMANYREQUESTS"
-	CodeUnknown           = "UNKNOWN"
+	CodeBlobUnknown         = "BLOB_UNKNOWN"
+	CodeBlobUploadInvalid   = "BLOB_UPLOAD_INVALID"
+	CodeBlobUploadUnknown   = "BLOB_UPLOAD_UNKNOWN"
+	CodeDigestInvalid       = "DIGEST_INVALID"
+	CodeManifestBlobUnknown = "MANIFEST_BLOB_UNKNOWN"
+	CodeManifestInvalid     = "MANIFEST_INVALID"
+	CodeManifestUnknown     = "MANIFEST_UNKNOWN"
+	CodeNameInvalid         = "NAME_INVALID"
+	CodeNameUnknown         = "NAME_UNKNOWN"
+	CodeDenied              = "DENIED"
+	CodeUnauthorized        = "UNAUTHORIZED"
+	CodeUnsupported         = "UNSUPPORTED"
+	CodeTooManyRequests     = "TOOMANYREQUESTS"
+	CodeUnknown             = "UNKNOWN"
 )
 
 // specError is one entry of the spec's error envelope.

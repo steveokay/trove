@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveokay/trove/internal/meta"
+	metamem "github.com/steveokay/trove/internal/meta/memory"
 	"github.com/steveokay/trove/internal/registry"
 	"github.com/steveokay/trove/internal/server"
 )
@@ -18,7 +19,7 @@ import (
 // the guard's own lookups still succeed and the failure lands in the handler
 // under test.
 type faultyMeta struct {
-	registry.Meta
+	*metamem.Store
 	fail string
 }
 
@@ -28,42 +29,96 @@ func (f *faultyMeta) GetRepository(ctx context.Context, name string) (meta.Repos
 	if f.fail == "GetRepository" {
 		return meta.Repository{}, errDisk
 	}
-	return f.Meta.GetRepository(ctx, name)
+	return f.Store.GetRepository(ctx, name)
 }
 
 func (f *faultyMeta) GetBlob(ctx context.Context, digest meta.Digest) (meta.Blob, error) {
 	if f.fail == "GetBlob" {
 		return meta.Blob{}, errDisk
 	}
-	return f.Meta.GetBlob(ctx, digest)
+	return f.Store.GetBlob(ctx, digest)
 }
 
 func (f *faultyMeta) PutBlob(ctx context.Context, b meta.Blob) error {
 	if f.fail == "PutBlob" {
 		return errDisk
 	}
-	return f.Meta.PutBlob(ctx, b)
+	return f.Store.PutBlob(ctx, b)
 }
 
 func (f *faultyMeta) CreateUpload(ctx context.Context, session meta.UploadSession) error {
 	if f.fail == "CreateUpload" {
 		return errDisk
 	}
-	return f.Meta.CreateUpload(ctx, session)
+	return f.Store.CreateUpload(ctx, session)
 }
 
 func (f *faultyMeta) GetUpload(ctx context.Context, id string) (meta.UploadSession, error) {
 	if f.fail == "GetUpload" {
 		return meta.UploadSession{}, errDisk
 	}
-	return f.Meta.GetUpload(ctx, id)
+	return f.Store.GetUpload(ctx, id)
 }
 
 func (f *faultyMeta) UpdateUpload(ctx context.Context, id string, bytes int64, at time.Time) error {
 	if f.fail == "UpdateUpload" {
 		return errDisk
 	}
-	return f.Meta.UpdateUpload(ctx, id, bytes, at)
+	return f.Store.UpdateUpload(ctx, id, bytes, at)
+}
+
+func (f *faultyMeta) PutManifest(ctx context.Context, m meta.Manifest, refs []meta.ManifestRef) error {
+	if f.fail == "PutManifest" {
+		return errDisk
+	}
+	return f.Store.PutManifest(ctx, m, refs)
+}
+
+func (f *faultyMeta) GetManifest(ctx context.Context, repo string, digest meta.Digest) (meta.Manifest, error) {
+	switch f.fail {
+	case "GetManifest":
+		return meta.Manifest{}, errDisk
+	case "GetManifestVanished":
+		// The row a tag points at is gone: drift, which the handler must
+		// answer as its own failure, never as "manifest unknown".
+		return meta.Manifest{}, meta.NotFound("manifest", string(digest))
+	}
+	return f.Store.GetManifest(ctx, repo, digest)
+}
+
+func (f *faultyMeta) DeleteManifest(ctx context.Context, repo string, digest meta.Digest) error {
+	if f.fail == "DeleteManifest" {
+		return errDisk
+	}
+	return f.Store.DeleteManifest(ctx, repo, digest)
+}
+
+func (f *faultyMeta) ListReferrers(ctx context.Context, repo string, subject meta.Digest, artifactType string) ([]meta.Manifest, error) {
+	if f.fail == "ListReferrers" {
+		return nil, errDisk
+	}
+	return f.Store.ListReferrers(ctx, repo, subject, artifactType)
+}
+
+func (f *faultyMeta) ListIndexParents(ctx context.Context, repo string, child meta.Digest) ([]meta.Digest, error) {
+	if f.fail == "ListIndexParents" {
+		return nil, errDisk
+	}
+	return f.Store.ListIndexParents(ctx, repo, child)
+}
+
+func (f *faultyMeta) PutTag(ctx context.Context, tag meta.Tag) error {
+	if f.fail == "PutTag" {
+		return errDisk
+	}
+	return f.Store.PutTag(ctx, tag)
+}
+
+func (f *faultyMeta) GetTag(ctx context.Context, repo, name string) (meta.Tag, error) {
+	if f.fail == "GetTag" {
+		return meta.Tag{}, errDisk
+	}
+	return f.Store.GetTag(ctx, repo, name)
 }
 
 // faultyStack builds the fixture with one metadata call rigged to fail after
@@ -72,7 +127,7 @@ func (f *faultyMeta) UpdateUpload(ctx context.Context, id string, bytes int64, a
 func faultyStack(t *testing.T, fail string) stack {
 	t.Helper()
 	s := newStack(t)
-	faulty := &faultyMeta{Meta: s.metaDB, fail: fail}
+	faulty := &faultyMeta{Store: s.metaDB, fail: fail}
 	router := server.NewRouter(&server.Guard{
 		Subjects: s.metaDB,
 		Bindings: s.metaDB,
@@ -86,6 +141,7 @@ func faultyStack(t *testing.T, fail string) stack {
 		Now: func() time.Time { return fixedTime },
 	}
 	handlers.Register(router)
+	(&registry.Manifests{Meta: faulty, Now: func() time.Time { return fixedTime }}).Register(router)
 	return stack{handler: router, metaDB: s.metaDB, blobs: s.blobs}
 }
 
@@ -102,6 +158,7 @@ func TestStoreFailuresAreServerErrors(t *testing.T) {
 		method  string
 		target  string
 		body    string
+		as      string
 		prepare func(t *testing.T, s stack) string
 	}{
 		{fail: "GetRepository", method: http.MethodPost, target: "/v2/team-a/api/blobs/uploads/"},
@@ -122,6 +179,54 @@ func TestStoreFailuresAreServerErrors(t *testing.T) {
 				return s.do(t, http.MethodPost, "/v2/team-a/api/blobs/uploads/", "carol", "").Header().Get("Location")
 			},
 		},
+		{fail: "GetRepository", method: http.MethodPut, target: "/v2/team-a/api/manifests/v1", body: layer},
+		{fail: "GetTag", method: http.MethodGet, target: "/v2/team-a/api/manifests/some-tag"},
+		{fail: "GetManifest", method: http.MethodGet, target: "/v2/team-a/api/manifests/" + digest},
+		{
+			fail: "GetBlob", method: http.MethodPut, target: "/v2/team-a/api/manifests/v1",
+			prepare: func(t *testing.T, s stack) (target string) {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/v1"
+			},
+			body: imageManifest(),
+		},
+		{
+			fail: "PutManifest", method: http.MethodPut, target: "/v2/team-a/api/manifests/v1",
+			prepare: func(t *testing.T, s stack) string {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/v1"
+			},
+			body: imageManifest(),
+		},
+		{
+			fail: "PutTag", method: http.MethodPut, target: "/v2/team-a/api/manifests/v1",
+			prepare: func(t *testing.T, s stack) string {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/v1"
+			},
+			body: imageManifest(),
+		},
+		{
+			fail: "DeleteManifest", method: http.MethodDelete, as: "mona",
+			prepare: func(t *testing.T, s stack) string {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/" + putManifest(t, s, "carol", "v1", "", imageManifest())
+			},
+		},
+		{
+			fail: "ListReferrers", method: http.MethodDelete, as: "mona",
+			prepare: func(t *testing.T, s stack) string {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/" + putManifest(t, s, "carol", "v1", "", imageManifest())
+			},
+		},
+		{
+			fail: "ListIndexParents", method: http.MethodDelete, as: "mona",
+			prepare: func(t *testing.T, s stack) string {
+				seedImageBlobs(t, s)
+				return "/v2/team-a/api/manifests/" + putManifest(t, s, "carol", "v1", "", imageManifest())
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -130,11 +235,15 @@ func TestStoreFailuresAreServerErrors(t *testing.T) {
 			armed := faultyStack(t, tt.fail)
 			target := tt.target
 			if tt.prepare != nil {
-				// Starting the upload works on the armed stack too: the
-				// start path does not touch the rigged call.
+				// Preparation works on the armed stack too: the setup paths
+				// do not touch the rigged call.
 				target = tt.prepare(t, armed)
 			}
-			rec := armed.do(t, tt.method, target, "carol", tt.body)
+			subject := tt.as
+			if subject == "" {
+				subject = "carol"
+			}
+			rec := armed.do(t, tt.method, target, subject, tt.body)
 			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), registry.CodeUnknown) {
 				t.Fatalf("%s with %s failing: %d %s, want a spec-shaped 500", tt.method, tt.fail, rec.Code, rec.Body)
 			}
@@ -158,6 +267,22 @@ func TestMetaBlobDriftIsAServerError(t *testing.T) {
 	rec := s.do(t, http.MethodGet, "/v2/team-a/api/blobs/"+digest.String(), "carol", "")
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("drifted blob read: %d, want 500 rather than a lie", rec.Code)
+	}
+}
+
+// A tag pointing at a manifest row that is gone is drift too: the store
+// guarantees the edge, so the answer is a 500, never "manifest unknown".
+func TestTagToMissingManifestIsAServerError(t *testing.T) {
+	t.Parallel()
+
+	armed := faultyStack(t, "GetManifestVanished")
+	seedImageBlobs(t, armed)
+	// The push does not read manifests back, so it lands even while armed.
+	putManifest(t, armed, "carol", "v1", "", imageManifest())
+
+	rec := armed.do(t, http.MethodGet, "/v2/team-a/api/manifests/v1", "carol", "")
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), registry.CodeUnknown) {
+		t.Fatalf("tag to vanished manifest: %d %s, want a spec-shaped 500", rec.Code, rec.Body)
 	}
 }
 

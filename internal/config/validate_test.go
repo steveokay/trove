@@ -47,6 +47,8 @@ func TestValidateCatalog(t *testing.T) {
 		{"s3 without bucket", func(c *Config) { c.Storage.Driver = "s3" }, "storage.s3.bucket"},
 		{"s3 without credentials", func(c *Config) { c.Storage.Driver = "s3" }, "storage.s3.secret_access_key"},
 
+		{"zero manifest cap", func(c *Config) { c.Registry.MaxManifestBytes = 0 }, "registry.max_manifest_bytes"},
+
 		{"negative cache budget", func(c *Config) { c.Cache.Budget = -1 }, "cache.budget"},
 		{"negative tag ttl", func(c *Config) { c.Cache.TagTTL = Duration(-time.Minute) }, "cache.tag_ttl"},
 		{"negative negative ttl", func(c *Config) { c.Cache.NegativeTTL = Duration(-time.Second) }, "cache.negative_ttl"},

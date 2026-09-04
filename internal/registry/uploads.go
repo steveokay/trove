@@ -19,7 +19,7 @@ import (
 // start serves POST /v2/<name>/blobs/uploads/: a new session, a monolithic
 // push when ?digest= is present, or a cross-repo mount.
 func (b *Blobs) start(w http.ResponseWriter, r *http.Request) {
-	name, ok := b.hostedRepo(w, r)
+	name, ok := hostedRepo(w, r, b.Meta, b.Log)
 	if !ok {
 		return
 	}
@@ -177,7 +177,7 @@ func (b *Blobs) openSession(w http.ResponseWriter, r *http.Request, name string)
 
 // patch serves PATCH <upload>: one chunk appended at the current offset.
 func (b *Blobs) patch(w http.ResponseWriter, r *http.Request) {
-	name, ok := b.hostedRepo(w, r)
+	name, ok := hostedRepo(w, r, b.Meta, b.Log)
 	if !ok {
 		return
 	}
@@ -225,7 +225,7 @@ func (b *Blobs) patch(w http.ResponseWriter, r *http.Request) {
 // session is gone -- a retry into a half-committed session would be a way to
 // smuggle content past the check (ADR 0007).
 func (b *Blobs) commit(w http.ResponseWriter, r *http.Request) {
-	name, ok := b.hostedRepo(w, r)
+	name, ok := hostedRepo(w, r, b.Meta, b.Log)
 	if !ok {
 		return
 	}
@@ -276,7 +276,7 @@ func (b *Blobs) commit(w http.ResponseWriter, r *http.Request) {
 
 // status serves GET <upload>: where the session stands, for resumption.
 func (b *Blobs) status(w http.ResponseWriter, r *http.Request) {
-	name, ok := b.hostedRepo(w, r)
+	name, ok := hostedRepo(w, r, b.Meta, b.Log)
 	if !ok {
 		return
 	}
@@ -292,7 +292,7 @@ func (b *Blobs) status(w http.ResponseWriter, r *http.Request) {
 
 // cancel serves DELETE <upload>.
 func (b *Blobs) cancel(w http.ResponseWriter, r *http.Request) {
-	name, ok := b.hostedRepo(w, r)
+	name, ok := hostedRepo(w, r, b.Meta, b.Log)
 	if !ok {
 		return
 	}

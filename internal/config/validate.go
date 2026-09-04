@@ -79,6 +79,8 @@ func (c *Config) validate(sources *sourceMap) error {
 		v.notEmpty("storage.s3.secret_access_key", c.Storage.S3.SecretAccessKey)
 	}
 
+	v.positiveBytes("registry.max_manifest_bytes", c.Registry.MaxManifestBytes)
+
 	v.nonNegativeBytes("cache.budget", c.Cache.Budget)
 	v.nonNegative("cache.tag_ttl", c.Cache.TagTTL)
 	v.nonNegative("cache.negative_ttl", c.Cache.NegativeTTL)
@@ -161,6 +163,12 @@ func (v *validator) nonNegative(key string, d Duration) {
 func (v *validator) nonNegativeBytes(key string, b Bytes) {
 	if b < 0 {
 		v.add(key, fmt.Sprintf("must not be negative, got %s", b))
+	}
+}
+
+func (v *validator) positiveBytes(key string, b Bytes) {
+	if b <= 0 {
+		v.add(key, fmt.Sprintf("must be greater than zero, got %s", b))
 	}
 }
 

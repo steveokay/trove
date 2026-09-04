@@ -159,6 +159,7 @@ built from.
 | `metrics.per_repo` | `false` | Repository names as labels are high-cardinality *and* leak names to anyone who can scrape. |
 | `webhooks.allow_private_targets` | `false` | A webhook target is an outbound request you control the URL of; private ranges are refused so subscriptions cannot probe your network. |
 | `storage.s3.redirect` | `false` | Presigned redirects take trove out of the data path, skipping read-side digest verification. |
+| `registry.max_manifest_bytes` | `4MiB` | Real manifests are kilobytes; the cap keeps an adversarial manifest payload out of memory. Pushes over it are refused with `MANIFEST_INVALID`. |
 | `scan.concurrency` | `1` | Scanning is memory-hungry; the safe default is one at a time. |
 
 ## Related

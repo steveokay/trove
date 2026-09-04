@@ -91,7 +91,8 @@ func runServe(ctx context.Context, env Env, args []string) error {
 		return fmt.Errorf("open blob storage: %w", err)
 	}
 
-	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, cfg.Server.ExternalURL, log))
+	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, cfg.Server.ExternalURL,
+		int64(cfg.Registry.MaxManifestBytes), log))
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -104,7 +105,7 @@ func runServe(ctx context.Context, env Env, args []string) error {
 // endpoints. A test walks the result, so what serve actually serves is pinned
 // rather than assumed.
 func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.PasswordLogin,
-	robots *authn.RobotSecrets, signer *token.Signer, externalURL string, log *slog.Logger,
+	robots *authn.RobotSecrets, signer *token.Signer, externalURL string, maxManifestBytes int64, log *slog.Logger,
 ) *server.Router {
 	challenge := server.TokenChallenge(externalURL)
 	credentials := server.Bearer(signer, server.BasicAuth(login, robots))
@@ -130,6 +131,7 @@ func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.Passw
 		Credentials: credentials, Subjects: store, Challenge: challenge, Log: log,
 	}).Register(router)
 	(&registry.Blobs{Store: hosted, Meta: store, Bindings: store, Log: log}).Register(router)
+	(&registry.Manifests{Meta: store, MaxBytes: maxManifestBytes, Log: log}).Register(router)
 	return router
 }
 
