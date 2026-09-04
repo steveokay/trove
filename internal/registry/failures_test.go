@@ -114,6 +114,13 @@ func (f *faultyMeta) PutTag(ctx context.Context, tag meta.Tag) error {
 	return f.Store.PutTag(ctx, tag)
 }
 
+func (f *faultyMeta) DeleteTag(ctx context.Context, repo, name string) error {
+	if f.fail == "DeleteTag" {
+		return errDisk
+	}
+	return f.Store.DeleteTag(ctx, repo, name)
+}
+
 func (f *faultyMeta) GetTag(ctx context.Context, repo, name string) (meta.Tag, error) {
 	if f.fail == "GetTag" {
 		return meta.Tag{}, errDisk

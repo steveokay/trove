@@ -88,6 +88,9 @@ func (r *Router) HandleOCI(method, suffix string, permission Permission, handler
 		if segment == "" {
 			panic(fmt.Sprintf("server: OCI route %s %s has an empty segment", method, suffix))
 		}
+		// Parsed at registration so an unknown constraint panics here rather
+		// than becoming a route that quietly never matches.
+		_, _, _ = cutPlaceholder(segment)
 	}
 
 	r.record(Route{Method: method, Pattern: "/v2/{name}" + suffix, Permission: permission})
@@ -127,8 +130,8 @@ func (r *Router) matchOCI(req *http.Request) (http.Handler, *http.Request, bool)
 		values := map[string]string{}
 		matched := true
 		for i, pattern := range route.segments {
-			if placeholder, ok := cutPlaceholder(pattern); ok {
-				if tail[i] == "" {
+			if placeholder, constraint, ok := cutPlaceholder(pattern); ok {
+				if tail[i] == "" || !constraint(tail[i]) {
 					matched = false
 					break
 				}
@@ -150,9 +153,41 @@ func (r *Router) matchOCI(req *http.Request) (http.Handler, *http.Request, bool)
 	return nil, nil, false
 }
 
-func cutPlaceholder(segment string) (string, bool) {
-	if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
-		return segment[1 : len(segment)-1], true
+// cutPlaceholder reads a "{name}" or "{name:kind}" segment, returning the
+// value name and the constraint the segment must satisfy.
+func cutPlaceholder(segment string) (name string, constraint ociConstraint, ok bool) {
+	if !strings.HasPrefix(segment, "{") || !strings.HasSuffix(segment, "}") {
+		return "", nil, false
 	}
-	return "", false
+	inner := segment[1 : len(segment)-1]
+	name, kind, constrained := strings.Cut(inner, ":")
+	if !constrained {
+		return inner, anySegment, true
+	}
+	check, known := ociConstraints[kind]
+	if !known {
+		panic(fmt.Sprintf("server: unknown route constraint %q in %q", kind, segment))
+	}
+	return name, check, true
+}
+
+// ociConstraint reports whether a path segment may fill a placeholder.
+type ociConstraint func(string) bool
+
+// anySegment accepts anything non-empty, which is what a bare "{name}" means.
+func anySegment(string) bool { return true }
+
+// ociConstraints is the closed set of constraints a route may name. It is
+// closed on purpose: a route table that accepted arbitrary patterns would be a
+// second matcher to disagree with the handlers, and the point of these two is
+// that one wire path carries two different permissions.
+//
+// The distribution spec overloads `/manifests/<reference>` for both a tag and
+// a digest, and deleting a tag is `tag:delete` while deleting a manifest is
+// `manifest:delete` (ADR 0002 keeps them apart because they destroy different
+// things). A route declares exactly one verb, so the two are two routes, and
+// the constraint is what tells them apart before the guard decides.
+var ociConstraints = map[string]ociConstraint{
+	"digest": func(segment string) bool { return strings.Contains(segment, ":") },
+	"tag":    func(segment string) bool { return !strings.Contains(segment, ":") },
 }

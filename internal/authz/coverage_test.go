@@ -33,7 +33,6 @@ func TestEveryVerbHasBothPolarities(t *testing.T) {
 // will wire it up. Entries are removed as those tasks land; adding one back
 // requires deleting tests, which is the point.
 var pendingVerbs = map[authz.Verb]string{
-	authz.TagDelete:         "the DELETE manifests/<tag> wire op — blocked on a route split (R-003 notes); protected-tag gating arrives with P-001",
 	authz.ScanRead:          "S-006 vulnerability queries",
 	authz.ScanTrigger:       "S-003 scan queue",
 	authz.PolicyRead:        "P-004 dry-run plans",

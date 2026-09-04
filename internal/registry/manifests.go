@@ -39,6 +39,7 @@ type ManifestMeta interface {
 	ListIndexParents(ctx context.Context, repo string, child meta.Digest) ([]meta.Digest, error)
 	PutTag(ctx context.Context, tag meta.Tag) error
 	GetTag(ctx context.Context, repo, name string) (meta.Tag, error)
+	DeleteTag(ctx context.Context, repo, name string) error
 }
 
 // Manifests serves the distribution API's manifest routes (R-002): PUT with
@@ -72,7 +73,14 @@ func (m *Manifests) Register(r *server.Router) {
 	r.HandleOCI(http.MethodHead, "/manifests/{reference}", read, http.HandlerFunc(m.head))
 	r.HandleOCI(http.MethodGet, "/manifests/{reference}", read, http.HandlerFunc(m.get))
 	r.HandleOCI(http.MethodPut, "/manifests/{reference}", write, http.HandlerFunc(m.put))
-	r.HandleOCI(http.MethodDelete, "/manifests/{reference}", del, http.HandlerFunc(m.delete))
+	// The spec overloads one path for two operations that destroy different
+	// things, and ADR 0002 keeps their permissions apart: deleting a manifest
+	// removes content and cascades its referrers, while deleting a tag removes
+	// only a name. A route carries one verb, so this is two routes, told apart
+	// by the reference's shape before the guard decides anything.
+	r.HandleOCI(http.MethodDelete, "/manifests/{reference:digest}", del, http.HandlerFunc(m.delete))
+	r.HandleOCI(http.MethodDelete, "/manifests/{reference:tag}",
+		server.Permission{Verb: authz.TagDelete, Resource: resource}, http.HandlerFunc(m.deleteTag))
 }
 
 func (m *Manifests) now() time.Time {
@@ -376,20 +384,16 @@ func (m *Manifests) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // delete serves DELETE /v2/<name>/manifests/<digest>: the manifest, its tags,
-// and its whole referrer tree in one operation (ADR 0011, Q22). Deleting by
-// tag is not supported; the error says what to do instead.
+// and its whole referrer tree in one operation (ADR 0011, Q22). A tag
+// reference reaches deleteTag instead, under its own verb.
 func (m *Manifests) delete(w http.ResponseWriter, r *http.Request) {
 	name, ok := hostedRepo(w, r, m.Meta, m.Log)
 	if !ok {
 		return
 	}
-	reference := server.OCIValue(r, "reference")
-	if !isDigestReference(reference) {
-		writeError(w, http.StatusBadRequest, CodeUnsupported,
-			"deleting by tag is not supported: delete by digest instead")
-		return
-	}
-	digest, ok := parsedDigest(w, reference)
+	// The route's constraint guarantees a digest-shaped reference, so the
+	// parse below is the only check this needs.
+	digest, ok := parsedDigest(w, server.OCIValue(r, "reference"))
 	if !ok {
 		return
 	}
@@ -508,4 +512,41 @@ func (m *Manifests) refuseIfIndexed(w http.ResponseWriter, r *http.Request, name
 		}
 	}
 	return true
+}
+
+// deleteTag serves DELETE /v2/<name>/manifests/<tag>: it removes the name and
+// leaves the content.
+//
+// This is a different operation from deleting a manifest, which is why it has
+// a different verb (ADR 0002): untagging abandons an artifact to retention and
+// garbage collection, while deleting a manifest destroys it and cascades its
+// referrers now. A subject trusted to move tags around is not thereby trusted
+// to destroy what they point at.
+//
+// P-001's tag policies land in front of this: a protected or immutable tag
+// refuses deletion regardless of the verb, and that check belongs here when it
+// exists.
+func (m *Manifests) deleteTag(w http.ResponseWriter, r *http.Request) {
+	name, ok := hostedRepo(w, r, m.Meta, m.Log)
+	if !ok {
+		return
+	}
+	tag := server.OCIValue(r, "reference")
+	if !tagPattern.MatchString(tag) {
+		// Not a legal tag, so it names nothing: unknown rather than invalid,
+		// so probing with garbage looks like probing with a real name.
+		writeError(w, http.StatusNotFound, CodeManifestUnknown, "manifest unknown to registry")
+		return
+	}
+
+	switch err := m.Meta.DeleteTag(r.Context(), name, tag); {
+	case errors.Is(err, meta.ErrNotFound):
+		writeError(w, http.StatusNotFound, CodeManifestUnknown, "manifest unknown to registry")
+		return
+	case err != nil:
+		server.Logger(r.Context(), m.Log).Error("delete tag", "repo", name, "tag", tag, "error", err)
+		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }

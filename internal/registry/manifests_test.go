@@ -477,7 +477,12 @@ func TestManifestDeleteRequiresItsVerb(t *testing.T) {
 	}
 }
 
-func TestManifestDeleteByTagUnsupported(t *testing.T) {
+// R-002 answered a tag-shaped DELETE with UNSUPPORTED because one route
+// could not carry both verbs. The route is now split by the reference's shape,
+// so this asserts what replaced that refusal: `manifest:delete` alone reaches
+// the tag route and is turned away there, and the tag survives. The full
+// split is exercised in tagdelete_test.go.
+func TestManifestDeleteDoesNotCarryTagDelete(t *testing.T) {
 	t.Parallel()
 
 	s := newStack(t)
@@ -485,11 +490,11 @@ func TestManifestDeleteByTagUnsupported(t *testing.T) {
 	putManifest(t, s, "carol", "v1", artifact.MediaTypeOCIManifest, imageManifest())
 
 	rec := s.do(t, http.MethodDelete, "/v2/team-a/api/manifests/v1", "mona", "")
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), registry.CodeUnsupported) {
-		t.Fatalf("delete by tag: %d %s, want UNSUPPORTED", rec.Code, rec.Body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), registry.CodeDenied) {
+		t.Fatalf("delete by tag as manifest:delete: %d %s, want DENIED", rec.Code, rec.Body)
 	}
 	if rec := s.do(t, http.MethodGet, "/v2/team-a/api/manifests/v1", "mona", ""); rec.Code != http.StatusOK {
-		t.Errorf("manifest gone after refused delete: %d", rec.Code)
+		t.Errorf("tag gone after refused delete: %d", rec.Code)
 	}
 }
 
