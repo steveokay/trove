@@ -662,6 +662,13 @@ Each task carries: ID, title, phase, status (`todo` / `blocked` / `in-progress` 
 `review` / `done`), owner, dependencies, acceptance criteria, and current coverage for
 the packages it touched.
 
+Acceptance cells are summaries, not essays. The full completion write-up for a
+finished task — design decisions, deviations, coverage, CI run — goes in
+`docs/notes/phase-N.md` under a `## <ID> — <title>` heading, added in the same
+commit; the row's cell keeps a one-to-three-sentence summary ending with
+`Details → docs/notes/phase-N.md`. Notes sections are frozen records: append new
+sections, never rewrite old ones.
+
 - Planning sessions **add** tasks. Implementation sessions **move** them.
 - A task reaches `done` only when: acceptance criteria met, tests written, coverage gate
   green, lint clean, docs updated.
