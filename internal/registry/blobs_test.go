@@ -24,8 +24,11 @@ var fixedTime = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 // repository proves pushes are refused by type, not by permission.
 type stack struct {
 	handler http.Handler
-	metaDB  *metamem.Store
-	blobs   *blobmem.Store
+	// router is the same value as handler, kept typed so a test file can
+	// register additional handlers on the shared fixture without editing it.
+	router *server.Router
+	metaDB *metamem.Store
+	blobs  *blobmem.Store
 }
 
 func newStack(t *testing.T) stack {
@@ -89,7 +92,7 @@ func newStack(t *testing.T) stack {
 	}
 	handlers.Register(router)
 	(&registry.Manifests{Meta: metaDB, Now: func() time.Time { return fixedTime }}).Register(router)
-	return stack{handler: router, metaDB: metaDB, blobs: blobs}
+	return stack{handler: router, router: router, metaDB: metaDB, blobs: blobs}
 }
 
 func (s stack) do(t *testing.T, method, target, as, body string, headers ...string) *httptest.ResponseRecorder {

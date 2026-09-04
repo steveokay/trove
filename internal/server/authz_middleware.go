@@ -36,6 +36,20 @@ type Permission struct {
 	//
 	// Mutually exclusive with Resource; Handle refuses a route with both.
 	Self func(*http.Request) (string, error)
+	// Listing marks a route that answers with a permission-filtered
+	// collection rather than a single resource: the catalog, and later
+	// search (ADR 0003 surfaces 1 and 4). There is no one resource to decide
+	// against, so the guard compiles the subject's bindings into the
+	// Visibility the route's verb grants -- the same compilation every
+	// filtered query runs under (Z-012) -- and hands it to the handler via
+	// VisibilityFrom. A subject with no grants gets a Visibility that shows
+	// nothing, and its empty page disclosed nothing; the anonymous subject
+	// with nothing visible gets the 401 challenge instead, because it may be
+	// able to authenticate into visibility (ADR 0003). No Decision is stored:
+	// nothing was decided, the filter is the enforcement.
+	//
+	// Mutually exclusive with Resource and Self; Handle refuses the route.
+	Listing bool
 	// RotationExempt lets a subject whose password demands rotation reach
 	// this route. It exists for exactly one route -- the rotation endpoint --
 	// because a gate with no door is a lockout, not a policy (Z-014). Every
@@ -108,6 +122,7 @@ const DefaultChallenge = `Bearer realm="trove"`
 const (
 	subjectKey contextKey = iota + 100
 	decisionKey
+	visibilityKey
 )
 
 // SubjectFrom returns the subject a guarded handler is serving. The second
@@ -122,6 +137,16 @@ func SubjectFrom(ctx context.Context) (authn.Subject, bool) {
 func DecisionFrom(ctx context.Context) (authz.Decision, bool) {
 	decision, ok := ctx.Value(decisionKey).(authz.Decision)
 	return decision, ok
+}
+
+// VisibilityFrom returns the Visibility the guard compiled for a Listing
+// route. Handlers on such routes query with this value and nothing else: it
+// is what makes "filter at the query layer" structural rather than a step
+// each handler remembers (ADR 0003). The second result is false outside a
+// listing route.
+func VisibilityFrom(ctx context.Context) (meta.Visibility, bool) {
+	visibility, ok := ctx.Value(visibilityKey).(meta.Visibility)
+	return visibility, ok
 }
 
 // Require wraps a handler so it runs only for a subject the permission allows.
@@ -198,6 +223,23 @@ func (g *Guard) Require(perm Permission, next http.Handler) http.Handler {
 			Logger(ctx, g.Log).Error("authorization could not read bindings",
 				"subject", subject.Name, "verb", perm.Verb, "error", err)
 			errs.Internal(w, r)
+			return
+		}
+
+		if perm.Listing {
+			visibility := VisibilityFor(bindings, perm.Verb)
+			if subject.IsAnonymous() && len(visibility.Filters()) == 0 {
+				// Nothing visible and nothing presented: the challenge,
+				// because the client may authenticate into visibility. An
+				// authenticated subject with no grants gets its empty page
+				// instead -- an empty listing disclosed nothing (ADR 0003).
+				Logger(ctx, g.Log).Info("anonymous listing with nothing visible", "verb", perm.Verb)
+				errs.Unauthorized(w, r, g.challenge(r))
+				return
+			}
+			ctx = context.WithValue(ctx, subjectKey, subject)
+			ctx = context.WithValue(ctx, visibilityKey, visibility)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 

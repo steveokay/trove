@@ -76,6 +76,11 @@ func (r *Router) Handle(method, pattern string, permission Permission, handler h
 		// two extractors would be competing for the same verb.
 		panic(fmt.Sprintf("server: route %s %s registered with both Resource and Self", method, pattern))
 	}
+	if permission.Listing && (permission.Resource != nil || permission.Self != nil) {
+		// A listing is about no single resource -- that is its definition --
+		// so an extractor on one is a category error.
+		panic(fmt.Sprintf("server: route %s %s registered as Listing with a resource or subject extractor", method, pattern))
+	}
 
 	r.record(Route{Method: method, Pattern: pattern, Permission: permission})
 	r.mux.Handle(method+" "+pattern, r.guard.Require(permission, handler))

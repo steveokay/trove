@@ -76,6 +76,11 @@ func (r *Router) HandleOCI(method, suffix string, permission Permission, handler
 	if !strings.HasPrefix(suffix, "/") || len(suffix) < 2 {
 		panic(fmt.Sprintf("server: OCI route %s %s: the suffix must start with '/' and name something", method, suffix))
 	}
+	if permission.Listing {
+		// An OCI route is always about the repository in its path; a
+		// cross-repository listing route registers through Handle.
+		panic(fmt.Sprintf("server: OCI route %s %s registered as Listing", method, suffix))
+	}
 
 	trimmed, trailingSlash := strings.CutSuffix(suffix, "/")
 	segments := strings.Split(strings.TrimPrefix(trimmed, "/"), "/")
