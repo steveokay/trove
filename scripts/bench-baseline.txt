@@ -1,0 +1,10 @@
+# Push-latency baseline (R-012): benchmark name and ns/op.
+#
+# Machine-specific. Capture on the runner that enforces it -- see the
+# bench job in .github/workflows/ci.yml -- never from a workstation.
+#
+# Recorded with: -benchtime=1s -count=3, best of 3.
+BenchmarkMonolithicBlobPush1MiB 1321563
+BenchmarkMonolithicBlobPush100MiB 97251049
+BenchmarkChunkedBlobPush 1364841
+BenchmarkManifestPut 16260
