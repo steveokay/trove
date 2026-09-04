@@ -51,6 +51,9 @@ type Manifests struct {
 	MaxBytes int64
 	// Now supplies timestamps. Nil means time.Now.
 	Now func() time.Time
+	// Pulls counts served pulls (R-010). Nil disables recording, which costs
+	// the pull path nothing: there is no writer to hand the observation to.
+	Pulls PullRecorder
 	// Log is the fallback logger when a request carries none.
 	Log *slog.Logger
 }
@@ -342,6 +345,12 @@ func (m *Manifests) head(w http.ResponseWriter, r *http.Request) {
 // get serves GET /v2/<name>/manifests/<reference>: the exact stored bytes
 // under the stored media type, because clients verify the digest of what they
 // receive.
+//
+// A successful GET is the pull that pull statistics count, and only a GET:
+// HEAD is a probe -- an existence check, a `docker manifest inspect`, a
+// mirror's revalidation -- and counting it would let a polling loop hold a tag
+// alive against a last-pulled retention rule (§7) without anything ever having
+// been fetched.
 func (m *Manifests) get(w http.ResponseWriter, r *http.Request) {
 	name, ok := knownRepo(w, r, m.Meta, m.Log)
 	if !ok {
@@ -350,6 +359,14 @@ func (m *Manifests) get(w http.ResponseWriter, r *http.Request) {
 	record, ok := m.resolve(w, r, name)
 	if !ok {
 		return
+	}
+	// Recorded once the reference resolved and before the bytes go out: what
+	// was pulled is already decided, a client that hangs up mid-body still
+	// pulled it, and the call is a channel send that never reaches the store
+	// (R-010). The reference is kept as the client wrote it, tag or digest,
+	// because both are pulls and they are counted apart.
+	if m.Pulls != nil {
+		m.Pulls.Record(name, server.OCIValue(r, "reference"))
 	}
 	manifestHeaders(w, record)
 	w.WriteHeader(http.StatusOK)

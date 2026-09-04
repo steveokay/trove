@@ -509,3 +509,81 @@ func (s *Store) ListStaleUploads(ctx context.Context, before time.Time, limit in
 		[]any{before.UTC().UnixMilli(), rowLimit},
 		func(rows *sql.Rows) (meta.UploadSession, error) { return scanUpload(rows) })
 }
+
+// validPullRecord rejects a record the store cannot account for. A zero or
+// negative count is a caller bug rather than an empty batch, and it would
+// corrupt a total nothing else can reconstruct.
+func validPullRecord(r meta.PullRecord) error {
+	switch {
+	case r.Repository == "":
+		return meta.Invalid("repository", "must not be empty")
+	case r.Reference == "":
+		return meta.Invalid("reference", "must not be empty")
+	case r.Count <= 0:
+		return meta.Invalid("count", "must be positive")
+	default:
+		return nil
+	}
+}
+
+// RecordPulls accumulates a batch of pull observations in one transaction. The
+// whole batch is validated first, so a bad record rejects it rather than
+// leaving half of it written.
+func (s *Store) RecordPulls(ctx context.Context, records []meta.PullRecord) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := validPullRecord(record); err != nil {
+			return err
+		}
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		for _, record := range records {
+			// The count adds and the timestamp only moves forward, so a batch
+			// that arrives out of order still lands on the same row. GREATEST
+			// is the right comparison here rather than a CASE: it ignores a
+			// NULL argument instead of propagating it, so an unknown timestamp
+			// cannot erase a known one.
+			if _, err := sqlutil.Execute(ctx, tx,
+				`INSERT INTO pull_stats (repo_name, tag, last_pulled_at, count) VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (repo_name, tag) DO UPDATE SET
+				     count = pull_stats.count + excluded.count,
+				     last_pulled_at = GREATEST(pull_stats.last_pulled_at, excluded.last_pulled_at)`,
+				record.Repository, record.Reference, sqlutil.Millis(record.At), record.Count); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetPullStats returns one reference's accumulated statistics. The caller
+// checks read permission on the repository first: this query does not know the
+// subject.
+func (s *Store) GetPullStats(ctx context.Context, repo, reference string) (meta.PullStats, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.PullStats{}, err
+	}
+
+	var (
+		stats  meta.PullStats
+		pulled sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT repo_name, tag, last_pulled_at, count FROM pull_stats
+		 WHERE repo_name = $1 AND tag = $2`, repo, reference).
+		Scan(&stats.Repository, &stats.Reference, &pulled, &stats.Count)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return meta.PullStats{}, meta.NotFound("pull stats", repo+"@"+reference)
+	case err != nil:
+		return meta.PullStats{}, fmt.Errorf("scan pull stats: %w", err)
+	}
+	stats.LastPulledAt = sqlutil.AsTime(pulled)
+	return stats, nil
+}

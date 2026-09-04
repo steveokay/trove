@@ -257,7 +257,7 @@ func TestAssembledRouteTable(t *testing.T) {
 		t.Fatalf("NewSigner: %v", err)
 	}
 
-	router := buildRouter(store, blobmem.New(blobmem.Options{}), login, nil, signer, "", 0, nil)
+	router := buildRouter(store, blobmem.New(blobmem.Options{}), login, nil, signer, "", 0, nil, nil)
 	if err := router.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}

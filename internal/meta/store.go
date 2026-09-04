@@ -133,6 +133,31 @@ type ContentStore interface {
 	// ListStaleUploads returns sessions untouched since the cutoff, oldest
 	// first, for the upload reaper (R-011).
 	ListStaleUploads(ctx context.Context, before time.Time, limit int) ([]UploadSession, error)
+
+	// RecordPulls accumulates a batch of pull observations in one transaction:
+	// each record adds its count to the reference's total and advances the
+	// last-pulled time, which never moves backwards however the batch is
+	// ordered. An empty batch is a no-op. A record with a non-positive count
+	// or an empty repository or reference is ErrInvalid, and the whole batch
+	// is rejected before anything is written.
+	//
+	// A record naming a repository or a reference that no longer exists still
+	// upserts. Pull statistics are observations, not references: they hold no
+	// foreign key, so a tag repointed or deleted between the pull and the
+	// flush cannot fail the write, and retention joins them against live
+	// content when it evaluates (§7).
+	//
+	// Callers batch off the hot path (R-010). A pull must never write here
+	// itself: this is the only method in the interface whose latency is
+	// deliberately nobody's request.
+	RecordPulls(ctx context.Context, records []PullRecord) error
+
+	// GetPullStats returns one reference's accumulated statistics, or
+	// ErrNotFound. There is deliberately no listing yet: retention's rules
+	// (the P tasks) will add one once they know the query shape they need, and
+	// the caller checks read permission on the repository first -- this method,
+	// like GetTag, does not know the subject.
+	GetPullStats(ctx context.Context, repo, reference string) (PullStats, error)
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

@@ -125,6 +125,33 @@ type UploadSession struct {
 	LastChunkAt time.Time
 }
 
+// PullRecord is one batch entry for RecordPulls: the pulls of a single
+// reference observed since the last flush, already aggregated by the caller.
+//
+// Reference is the reference as the client asked for it. A manifest is pulled
+// by tag or by digest and both count (R-010), so the column ADR 0006 named
+// "tag" holds either; the Go field says Reference because that is what it is.
+type PullRecord struct {
+	Repository string
+	Reference  string
+	// At is when the most recent of these pulls happened. The caller supplies
+	// it: no store calls time.Now (§7).
+	At time.Time
+	// Count is how many pulls this record accounts for. It must be positive --
+	// a record of nothing is a caller bug, not an empty batch.
+	Count int64
+}
+
+// PullStats is a reference's accumulated pull record: when it was last pulled
+// and how many times. Retention's keep-if-pulled-since rule reads it, which is
+// why the timestamp only ever moves forward.
+type PullStats struct {
+	Repository   string
+	Reference    string
+	LastPulledAt time.Time
+	Count        int64
+}
+
 // ScopeFilter matches repository names for permission-filtered queries. It is
 // the compiled form of a binding scope (ADR 0001): authz produces these plain
 // values, so the authorization engine never imports a storage package and the

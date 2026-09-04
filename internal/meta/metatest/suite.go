@@ -55,6 +55,9 @@ func Run(t *testing.T, f Factory) {
 		{"Blobs", testBlobs},
 		{"Uploads", testUploads},
 		{"StaleUploads", testStaleUploads},
+		{"PullStats", testPullStats},
+		{"PullStatsEmptyBatch", testPullStatsEmptyBatch},
+		{"PullStatsValidation", testPullStatsValidation},
 		{"DeleteRepositoryRemovesContent", testDeleteRepositoryRemovesContent},
 		{"ContextCancellation", testContextCancellation},
 		{"CloseIsIdempotent", testCloseIsIdempotent},
@@ -1030,6 +1033,124 @@ func testStaleUploads(t *testing.T, s meta.Store) {
 	}
 }
 
+// Pull statistics accumulate: a flush adds to what is there and advances the
+// last-pulled time, never replacing either. Retention's keep-if-pulled-since
+// rule reads both, and a count that reset on every flush would quietly make
+// every artifact look unused (§7).
+//
+// No repository is created here on purpose. These rows are observations, not
+// references: a tag that moved or a repository that went away between the pull
+// and the flush must still record (R-010).
+func testPullStats(t *testing.T, s meta.Store) {
+	var (
+		first   = testTime
+		later   = testTime.Add(time.Hour)
+		earlier = testTime.Add(-time.Hour)
+		byHash  = string(digest("pulled-by-digest"))
+	)
+
+	if err := s.RecordPulls(ctx(), []meta.PullRecord{
+		{Repository: "team-a/api", Reference: "latest", At: first, Count: 3},
+		{Repository: "team-a/api", Reference: byHash, At: first, Count: 1},
+	}); err != nil {
+		t.Fatalf("RecordPulls: %v", err)
+	}
+
+	requirePullStats(t, s, "team-a/api", "latest", 3, first)
+	// A pull by digest is a pull, and it is its own row: the reference the
+	// client used is what was recorded.
+	requirePullStats(t, s, "team-a/api", byHash, 1, first)
+
+	// A second flush adds to the row rather than replacing it, and the newer
+	// observation moves the last-pulled time forward.
+	if err := s.RecordPulls(ctx(), []meta.PullRecord{
+		{Repository: "team-a/api", Reference: "latest", At: later, Count: 2},
+	}); err != nil {
+		t.Fatalf("RecordPulls (second batch): %v", err)
+	}
+	requirePullStats(t, s, "team-a/api", "latest", 5, later)
+
+	// An older observation still counts -- flushes can arrive out of order --
+	// but it must not drag the timestamp backwards.
+	if err := s.RecordPulls(ctx(), []meta.PullRecord{
+		{Repository: "team-a/api", Reference: "latest", At: earlier, Count: 1},
+	}); err != nil {
+		t.Fatalf("RecordPulls (late batch): %v", err)
+	}
+	requirePullStats(t, s, "team-a/api", "latest", 6, later)
+
+	_, err := s.GetPullStats(ctx(), "team-a/api", "never-pulled")
+	requireErrIs(t, err, meta.ErrNotFound, "GetPullStats for an unpulled reference")
+
+	_, err = s.GetPullStats(ctx(), "ghost", "latest")
+	requireErrIs(t, err, meta.ErrNotFound, "GetPullStats in a repository with no statistics")
+}
+
+func requirePullStats(t *testing.T, s meta.Store, repo, reference string, count int64, pulled time.Time) {
+	t.Helper()
+
+	got, err := s.GetPullStats(ctx(), repo, reference)
+	if err != nil {
+		t.Fatalf("GetPullStats(%s, %s): %v", repo, reference, err)
+	}
+	if got.Repository != repo || got.Reference != reference {
+		t.Errorf("stats = %+v, want them to identify %s %s", got, repo, reference)
+	}
+	if got.Count != count {
+		t.Errorf("count = %d, want %d", got.Count, count)
+	}
+	if !got.LastPulledAt.Equal(pulled) {
+		t.Errorf("LastPulledAt = %v, want %v", got.LastPulledAt, pulled)
+	}
+}
+
+// An empty batch is a no-op, not an error and not a transaction: the batcher
+// flushes on a timer whether or not anything was pulled (R-010).
+func testPullStatsEmptyBatch(t *testing.T, s meta.Store) {
+	if err := s.RecordPulls(ctx(), nil); err != nil {
+		t.Errorf("RecordPulls(nil): %v, want nil", err)
+	}
+	if err := s.RecordPulls(ctx(), []meta.PullRecord{}); err != nil {
+		t.Errorf("RecordPulls(empty): %v, want nil", err)
+	}
+
+	_, err := s.GetPullStats(ctx(), "team-a/api", "latest")
+	requireErrIs(t, err, meta.ErrNotFound, "GetPullStats after empty batches")
+}
+
+func testPullStatsValidation(t *testing.T, s meta.Store) {
+	tests := []struct {
+		name   string
+		record meta.PullRecord
+	}{
+		{"empty repository", meta.PullRecord{Reference: "latest", At: testTime, Count: 1}},
+		{"empty reference", meta.PullRecord{Repository: "repo", At: testTime, Count: 1}},
+		// A record of no pulls is a caller bug, not an empty batch: it would
+		// create a row claiming a reference was pulled zero times.
+		{"zero count", meta.PullRecord{Repository: "repo", Reference: "latest", At: testTime}},
+		{"negative count", meta.PullRecord{Repository: "repo", Reference: "latest", At: testTime, Count: -1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := s.RecordPulls(ctx(), []meta.PullRecord{tt.record})
+			requireErrIs(t, err, meta.ErrInvalid, "RecordPulls")
+		})
+	}
+
+	// One bad record rejects the batch. A partially applied flush would leave
+	// a total that nothing can reconstruct, because the observations behind it
+	// are gone.
+	err := s.RecordPulls(ctx(), []meta.PullRecord{
+		{Repository: "repo", Reference: "good", At: testTime, Count: 1},
+		{Repository: "repo", Reference: "", At: testTime, Count: 1},
+	})
+	requireErrIs(t, err, meta.ErrInvalid, "RecordPulls with one bad record")
+
+	_, err = s.GetPullStats(ctx(), "repo", "good")
+	requireErrIs(t, err, meta.ErrNotFound, "GetPullStats after a rejected batch")
+}
+
 func testDeleteRepositoryRemovesContent(t *testing.T, s meta.Store) {
 	mustCreateRepo(t, s, "doomed", meta.Hosted)
 	mustCreateRepo(t, s, "survivor", meta.Hosted)
@@ -1156,6 +1277,14 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"UpdateUpload", func() error { return s.UpdateUpload(ctx, "u", 1, testTime) }},
 		{"DeleteUpload", func() error { return s.DeleteUpload(ctx, "u") }},
 		{"ListStaleUploads", func() error { _, err := s.ListStaleUploads(ctx, testTime, 0); return err }},
+		// A valid, non-empty batch: an empty one is a no-op and would never
+		// reach the store's first statement.
+		{"RecordPulls", func() error {
+			return s.RecordPulls(ctx, []meta.PullRecord{
+				{Repository: "repo", Reference: "t", At: testTime, Count: 1},
+			})
+		}},
+		{"GetPullStats", func() error { _, err := s.GetPullStats(ctx, "repo", "t"); return err }},
 
 		{"CreateSubject", func() error {
 			return s.CreateSubject(ctx, meta.Subject{ID: "s", Kind: meta.User, Name: "s"})

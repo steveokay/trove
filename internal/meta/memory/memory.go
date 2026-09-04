@@ -33,6 +33,11 @@ type Store struct {
 	blobs   map[meta.Digest]meta.Blob
 	uploads map[string]meta.UploadSession
 
+	// Pull statistics are keyed by repository and reference and by nothing
+	// else: they are observations, so a row outlives the content it counted
+	// and can be written for content that never existed.
+	pullStats map[pullKey]meta.PullStats
+
 	// Identity is keyed by name, the handle operators use; ids are the
 	// stable reference bindings point at.
 	subjects      map[string]meta.Subject
@@ -75,6 +80,7 @@ func newEmpty() *Store {
 		tags:      make(map[string]map[string]meta.Tag),
 		blobs:     make(map[meta.Digest]meta.Blob),
 		uploads:   make(map[string]meta.UploadSession),
+		pullStats: make(map[pullKey]meta.PullStats),
 
 		subjects:      make(map[string]meta.Subject),
 		subjectGroups: make(map[string]meta.SubjectGroup),
@@ -807,6 +813,86 @@ func (s *Store) ListStaleUploads(ctx context.Context, before time.Time, limit in
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// --- pull statistics ---
+
+// pullKey identifies one statistics row: a repository and the reference as the
+// client asked for it, tag or digest.
+type pullKey struct {
+	repository string
+	reference  string
+}
+
+// validPullRecord rejects a record the store cannot account for. A zero or
+// negative count is a caller bug rather than an empty batch, and it would
+// corrupt a total nothing else can reconstruct.
+func validPullRecord(r meta.PullRecord) error {
+	switch {
+	case r.Repository == "":
+		return meta.Invalid("repository", "must not be empty")
+	case r.Reference == "":
+		return meta.Invalid("reference", "must not be empty")
+	case r.Count <= 0:
+		return meta.Invalid("count", "must be positive")
+	default:
+		return nil
+	}
+}
+
+// RecordPulls accumulates a batch of pull observations. The whole batch is
+// validated before any of it is applied, so a bad record rejects it rather
+// than leaving half of it counted.
+func (s *Store) RecordPulls(ctx context.Context, records []meta.PullRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	for _, record := range records {
+		if err := validPullRecord(record); err != nil {
+			return err
+		}
+	}
+	for _, record := range records {
+		key := pullKey{repository: record.Repository, reference: record.Reference}
+		stats, ok := s.pullStats[key]
+		if !ok {
+			stats = meta.PullStats{Repository: record.Repository, Reference: record.Reference}
+		}
+		stats.Count += record.Count
+		// The timestamp only moves forward, so a batch that arrives out of
+		// order still leaves the latest pull as the last-pulled time.
+		if record.At.After(stats.LastPulledAt) {
+			stats.LastPulledAt = record.At
+		}
+		s.pullStats[key] = stats
+	}
+	return nil
+}
+
+// GetPullStats returns one reference's accumulated statistics.
+func (s *Store) GetPullStats(ctx context.Context, repo, reference string) (meta.PullStats, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.PullStats{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.PullStats{}, err
+	}
+
+	stats, ok := s.pullStats[pullKey{repository: repo, reference: reference}]
+	if !ok {
+		return meta.PullStats{}, meta.NotFound("pull stats", repo+"@"+reference)
+	}
+	return stats, nil
 }
 
 // --- helpers ---
