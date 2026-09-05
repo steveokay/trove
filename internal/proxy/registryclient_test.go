@@ -67,9 +67,25 @@ func TestClientFaults(t *testing.T) {
 }
 
 // mustClient builds a client or fails the test.
+//
+// Every client gets its own transport unless the test supplied one. That is
+// not tidiness: the default is http.DefaultTransport, whose connection pool is
+// process-global, so parallel tests would share it. One test's httptest server
+// closing -- and freeing a port another server then binds -- can leave a
+// pooled connection in that shared pool that a different test then reuses,
+// which fails as "connection broken: CloseIdleConnections called" in whichever
+// test happened to draw it. The failure lands somewhere unrelated to its
+// cause, which is the worst shape a flake can take (CLAUDE.md section 9: a
+// flaky test is fixed the day it flakes). Per-test pools make the outcome
+// independent of what else is running.
 func mustClient(t *testing.T, options proxy.Options) *proxy.RegistryClient {
 	t.Helper()
 
+	if options.Transport == nil {
+		transport := &http.Transport{}
+		t.Cleanup(transport.CloseIdleConnections)
+		options.Transport = transport
+	}
 	client, err := proxy.New(options)
 	if err != nil {
 		t.Fatalf("New: %v", err)
