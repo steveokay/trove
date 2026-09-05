@@ -474,13 +474,13 @@ func Rules() []Rule {
 		},
 		{
 			Name:   "trivy-is-quarantined",
-			Reason: "ADR 0017: internal/scan/trivy is the only package that may name Trivy. Everything else goes through scan.Scanner, so results stay normalised and the vendor stays replaceable.",
+			Reason: "ADR 0017 / S-001: internal/scan/trivy is the only package that may name a vendor scanner. Everything else goes through scan.Scanner, so results stay normalised and the vendor stays replaceable. The whole aquasecurity module namespace is listed, not just trivy itself: the sibling modules Trivy's API hands back are vendor types too, and a normalised report that carries one is not normalised.",
 			From:   []string{modulePath + "/..."},
 			Except: []string{pkg("internal/scan/trivy") + "/..."},
 			Forbidden: []string{
-				"github.com/aquasecurity/trivy/...",
-				"github.com/aquasecurity/trivy-db/...",
-				"github.com/aquasecurity/trivy-checks/...",
+				"github.com/aquasecurity/...",
+				"github.com/anchore/grype/...",
+				"github.com/quay/claircore/...",
 			},
 			Mode: Direct,
 		},

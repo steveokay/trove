@@ -87,3 +87,50 @@ type Scanner interface {
   upgrade gate.
 - Scan memory use bounds worker concurrency — documented in operator sizing docs
   (DOC-002) with the default of 1.
+
+## Clarifications (S-001, 2026-09-05)
+
+Freezing the interface surfaced two questions the decision above does not
+settle. Both are recorded here rather than in a commit message, because the
+adapter (S-002) and the gate (S-011) each need the answer.
+
+### `SeverityUnknown` exists in the model but a conforming adapter never emits it
+
+This ADR maps vendor-unknown to `low` ("never dropped"), while ADR 0012's
+`scan.completed` payload carries an `Unknown` severity bucket. Both stay as
+written, and the enum keeps `unknown`, ranked below `low`:
+
+- The **adapter** maps vendor-unknown to `low`, exactly as decided above. A
+  report produced by a conforming adapter therefore contains no `unknown`
+  finding, and a policy threshold never has to reason about one.
+- The **bucket** exists because findings can arrive without passing through an
+  adapter: `trove db import` on an air-gapped deployment (Q6) and
+  `trove migrate --from` (Q17) both carry data whose severity vocabulary is
+  somebody else's. Dropping the bucket would mean silently re-labelling that
+  data as `low`, which is a claim the importer cannot make.
+
+Ranking `unknown` lowest means an imported finding can never be *more* severe
+than it is known to be — it fails a `max-severity` threshold open rather than
+blocking a pull on an unclassified CVE, which is consistent with gating being
+off by default and observed before it is enforced (Q12).
+
+### Scan status stays two-valued; "cannot analyse" is a failure, not a clean bill
+
+`Report.Status` is `succeeded` or `failed`, and nothing else. A third state for
+"the scanner does not understand this artifact" was considered and rejected:
+ADR 0013 defines no gating meaning for it, so every gate would need a rule for
+a state that only ever means "treat as unscanned" or "treat as clean" — which
+the two existing states already say.
+
+The distinction the adapter must make instead:
+
+- An artifact that is **not an image** — a signature, an SBOM, an attestation
+  (`artifact.Kind` says which, R-007) — has no vulnerabilities by construction.
+  It is `succeeded` with no findings, and that is true rather than convenient.
+- An **image the scanner cannot analyse** — an unsupported base, a corrupt
+  layer, a format the engine rejects — is `failed`. Reporting it as
+  succeeded-with-no-findings would publish a clean bill for something nobody
+  examined, and `unscanned: block` exists precisely to catch that case.
+
+S-002 must therefore branch on artifact kind before it branches on the vendor's
+error, and S-011 gates on `Clean()` rather than on an empty findings list.
