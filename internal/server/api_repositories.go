@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveokay/trove/internal/authz"
 	"github.com/steveokay/trove/internal/meta"
+	"github.com/steveokay/trove/internal/proxy"
 	"github.com/steveokay/trove/internal/repo"
 )
 
@@ -34,6 +35,13 @@ const maxRepositoryBodyBytes = 1 << 20
 //
 // It is deliberately not the whole store: this handler creates, reads,
 // reconfigures, and deletes entities, and can reach no content method at all.
+//
+// The credential methods are the sharper case. Put, Delete and Status are here;
+// meta.ProxyCredentialStore's GetProxyCredential -- the one method in the whole
+// store that returns a stored secret -- is not. That is the strongest form
+// C-003's acceptance criterion can take: "no read path returns a credential"
+// is not a rule this handler follows, it is a value this handler's type cannot
+// obtain (ADR 0016).
 type RepositoryAdminStore interface {
 	CreateRepository(ctx context.Context, repository meta.Repository) (meta.Repository, error)
 	GetRepository(ctx context.Context, name string) (meta.Repository, error)
@@ -41,6 +49,10 @@ type RepositoryAdminStore interface {
 	UpdateRepositoryConfig(ctx context.Context, name string, config []byte, expectedVersion int64,
 		actor string, at time.Time) (meta.Repository, error)
 	DeleteRepository(ctx context.Context, name string) error
+
+	PutProxyCredential(ctx context.Context, cred meta.ProxyCredential) error
+	ProxyCredentialStatus(ctx context.Context, repository string) (meta.ProxyCredentialStatus, error)
+	DeleteProxyCredential(ctx context.Context, repository string) error
 }
 
 // Repositories serves the repository admin API (C-016, ADR 0015):
@@ -50,6 +62,8 @@ type RepositoryAdminStore interface {
 //	GET    /api/v1/repositories/{name}
 //	PUT    /api/v1/repositories/{name}/config
 //	DELETE /api/v1/repositories/{name}
+//	PUT    /api/v1/repositories/{name}/credentials
+//	DELETE /api/v1/repositories/{name}/credentials
 //
 // The resources are repository *entities* -- the rows a name's first path
 // segment routes to (ADR 0005) -- not the OCI names that hold content. The
@@ -57,21 +71,40 @@ type RepositoryAdminStore interface {
 // entity is what an operator creates and configures, a content name is what a
 // client pulls from.
 //
-// Three of the five routes carry a verb the guard settles by itself. The two
-// that do not are the proxy cases: reading a proxy's configuration needs
+// Three of the seven routes carry a verb the guard settles by itself. Two do
+// not, and they are the proxy cases: reading a proxy's configuration needs
 // proxy:read on top of the repo:list that admitted the request, and changing
 // one needs proxy:write on top of repo:configure. Both are ADR 0002
 // conjunctions, and they are made here for the same reason the referrers
 // handler makes its own -- a route declares exactly one verb, so the second
 // half of a conjunction is the handler's.
+//
+// The remaining two are the credential routes, and they are the opposite
+// shape: proxy:credentials on its own is the whole check, because it is
+// implied by nothing (ADR 0002). A subject holding proxy:write and
+// repo:configure -- everything needed to point the proxy somewhere else --
+// still cannot set or remove its password.
+//
+// There is deliberately no GET of a credential, at any verb. proxy:credentials
+// gates writing it, and ADR 0016 makes the read side stronger than the verb:
+// the API returns set/unset and a rotation time and never a value, so there is
+// no endpoint to authorize. The status rides on the repository resource, which
+// is where a client is already looking.
 type Repositories struct {
 	// Store persists entities.
 	Store RepositoryAdminStore
 	// Bindings supplies effective bindings for the handler's own
 	// sub-decisions.
 	Bindings BindingStore
-	// Now supplies creation and reconfiguration timestamps. Nil means
-	// time.Now; no store reads a clock of its own (§7).
+	// Keys seals an upstream credential before it is stored. Nil means the
+	// credential routes refuse: a deployment without key material must not
+	// quietly store a password in the clear (ADR 0016).
+	//
+	// It is the sealing half only. This handler has no way to open a value,
+	// which is the same statement RepositoryAdminStore makes about reading one.
+	Keys proxy.Sealer
+	// Now supplies creation, reconfiguration, and rotation timestamps. Nil
+	// means time.Now; no store reads a clock of its own (§7).
 	Now func() time.Time
 	// Errors renders refusals. Nil means ProblemErrors, the admin API's shape.
 	Errors ErrorRenderer
@@ -79,11 +112,11 @@ type Repositories struct {
 	Log *slog.Logger
 }
 
-// Register puts the five routes on the table.
+// Register puts the seven routes on the table.
 //
 // The listing is a Listing permission, so the guard compiles the subject's
 // bindings into a Visibility and the store filters inside its query -- there
-// is no unfiltered read here to forget to filter (ADR 0003). The other four
+// is no unfiltered read here to forget to filter (ADR 0003). The other six
 // name one entity, and their resource comes out of the path, so an unusable
 // name is refused before anything is looked up.
 func (h *Repositories) Register(r *Router) {
@@ -97,6 +130,10 @@ func (h *Repositories) Register(r *Router) {
 		Permission{Verb: authz.RepoConfigure, Resource: repositoryPathResource}, h.updateConfig)
 	r.HandleFunc(http.MethodDelete, "/api/v1/repositories/{name}",
 		Permission{Verb: authz.RepoDelete, Resource: repositoryPathResource}, h.delete)
+	r.HandleFunc(http.MethodPut, "/api/v1/repositories/{name}/credentials",
+		Permission{Verb: authz.ProxyCredentials, Resource: repositoryPathResource}, h.setCredential)
+	r.HandleFunc(http.MethodDelete, "/api/v1/repositories/{name}/credentials",
+		Permission{Verb: authz.ProxyCredentials, Resource: repositoryPathResource}, h.deleteCredential)
 }
 
 // repositoryPathResource is what the verb applies to: the entity named in the
@@ -120,6 +157,34 @@ type repositoryResource struct {
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
 	Config        json.RawMessage `json:"config,omitempty"`
+	// Credential is present for a proxy the subject may read the config of,
+	// and absent otherwise -- including on every hosted and group entity,
+	// which have no upstream to authenticate to.
+	Credential *credentialStatusResource `json:"credential,omitempty"`
+}
+
+// credentialStatusResource is everything the API ever says about an upstream
+// credential: whether one is set, and when it was last written.
+//
+// It has no field for a value and never will. ADR 0016 makes this stronger
+// than the verb that guards writing one -- proxy:credentials does not buy a
+// read, and neither does anything else -- so there is no endpoint returning a
+// credential to authorize, and this type is why a future edit cannot
+// accidentally add one. It is built from meta.ProxyCredentialStatus, which the
+// store fills from a query that selects no column holding the ciphertext.
+type credentialStatusResource struct {
+	Set bool `json:"set"`
+	// RotatedAt is when the credential was last written, or the zero time when
+	// none is set. It is always present so a client reads one field either way.
+	RotatedAt time.Time `json:"rotated_at"`
+}
+
+// credentialRequest is the body of a credential write. Both fields are
+// required: a half-filled credential authenticates as nobody and produces an
+// upstream 401 that reads like a wrong password rather than a missing one.
+type credentialRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // repositoryListResponse is one page of entities. NextCursor is always present
@@ -290,7 +355,140 @@ func (h *Repositories) get(w http.ResponseWriter, r *http.Request) {
 		}
 		includeConfig = allowed
 	}
-	h.writeResource(w, r, http.StatusOK, resourceOf(repository, includeConfig))
+
+	resource := resourceOf(repository, includeConfig)
+	if repository.Type == meta.Proxy && includeConfig {
+		// Whether a proxy authenticates at all is part of reading its
+		// configuration, so it rides the same proxy:read decision: an operator
+		// diagnosing a 401 from an upstream needs to know a credential exists
+		// without being able to see it. proxy:credentials buys nothing extra
+		// here -- there is no larger answer for it to unlock (ADR 0016).
+		status, err := h.Store.ProxyCredentialStatus(ctx, name)
+		if err != nil {
+			Logger(ctx, h.Log).Error("read proxy credential status", "repository", name, "error", err)
+			errs.Internal(w, r)
+			return
+		}
+		resource.Credential = &credentialStatusResource{Set: status.Set, RotatedAt: status.RotatedAt}
+	}
+	h.writeResource(w, r, http.StatusOK, resource)
+}
+
+// setCredential serves PUT /api/v1/repositories/{name}/credentials.
+//
+// proxy:credentials is the whole check and it is implied by nothing (ADR
+// 0002): the subject who may repoint this proxy at another registry still
+// cannot set the password it presents there. There is no second conjunct, so
+// unlike updateConfig this handler makes no sub-decision of its own.
+//
+// The answer is 204 with no body, and that is not laziness. Echoing anything
+// back would create a response shape that a later edit could grow a value
+// into; the credential's state is readable in exactly one place, on the
+// repository resource, and it is set/unset plus a timestamp there.
+func (h *Repositories) setCredential(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	errs := h.errors()
+
+	name := r.PathValue("name")
+	if _, ok := h.loadProxy(w, r, name); !ok {
+		return
+	}
+	if h.Keys == nil {
+		// Refusing beats storing something we cannot encrypt. A deployment
+		// reaching here has no key material, which is a startup problem
+		// (ADR 0016) that this route must not paper over.
+		Logger(ctx, h.Log).Error("a credential write arrived with no keyring configured", "repository", name)
+		errs.Internal(w, r)
+		return
+	}
+
+	var request credentialRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRepositoryBodyBytes)).Decode(&request); err != nil {
+		errs.BadRequest(w, r, "the body must be JSON with username and password")
+		return
+	}
+	if request.Username == "" || request.Password == "" {
+		errs.BadRequest(w, r, "username and password must both be set: "+
+			"a half-filled credential authenticates as nobody and looks like a wrong password upstream")
+		return
+	}
+
+	sealed, err := proxy.SealCredential(h.Keys, name, request.Username, request.Password)
+	if err != nil {
+		// proxy's errors name the repository and never the value, so this is
+		// safe to log. Nothing about it is safe to return.
+		Logger(ctx, h.Log).Error("seal proxy credential", "repository", name, "error", err)
+		errs.Internal(w, r)
+		return
+	}
+
+	switch err := h.Store.PutProxyCredential(ctx, meta.ProxyCredential{
+		Repository: name, Sealed: sealed, RotatedAt: h.now(),
+	}); {
+	case errors.Is(err, meta.ErrNotFound):
+		// Deleted between the read above and the write.
+		errs.NotFound(w, r)
+		return
+	case errors.Is(err, meta.ErrInvalid):
+		// The store's own refusal past the type check above -- the entity
+		// stopped being a proxy between the two reads.
+		errs.BadRequest(w, r, err.Error())
+		return
+	case err != nil:
+		Logger(ctx, h.Log).Error("store proxy credential", "repository", name, "error", err)
+		errs.Internal(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteCredential serves DELETE /api/v1/repositories/{name}/credentials,
+// reverting the proxy to anonymous access on its next upstream request.
+//
+// A repository with no credential answers 404, the same as every other delete
+// in this resource. It discloses nothing new: the subject holds
+// proxy:credentials, and set/unset is already on the repository resource for
+// anyone who may read the configuration.
+func (h *Repositories) deleteCredential(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	errs := h.errors()
+
+	name := r.PathValue("name")
+	if _, ok := h.loadProxy(w, r, name); !ok {
+		return
+	}
+
+	switch err := h.Store.DeleteProxyCredential(ctx, name); {
+	case errors.Is(err, meta.ErrNotFound):
+		errs.NotFound(w, r)
+		return
+	case err != nil:
+		Logger(ctx, h.Log).Error("delete proxy credential", "repository", name, "error", err)
+		errs.Internal(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// loadProxy reads one entity and refuses anything that is not a proxy, having
+// already written the refusal when it cannot.
+//
+// A hosted or group entity has no upstream, so it has no credential
+// sub-resource; the refusal is a 400 rather than a 404 because
+// proxy:credentials already admitted the request and the entity's existence
+// and type are not what is being withheld -- naming the mistake is what makes
+// it fixable from the response alone.
+func (h *Repositories) loadProxy(w http.ResponseWriter, r *http.Request, name string) (meta.Repository, bool) {
+	repository, ok := h.load(w, r, name)
+	if !ok {
+		return meta.Repository{}, false
+	}
+	if repository.Type != meta.Proxy {
+		h.errors().BadRequest(w, r, "the repository "+name+" is a "+string(repository.Type)+
+			", not a proxy: only a proxy authenticates to an upstream")
+		return meta.Repository{}, false
+	}
+	return repository, true
 }
 
 // updateConfig serves PUT /api/v1/repositories/{name}/config.

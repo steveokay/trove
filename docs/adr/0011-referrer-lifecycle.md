@@ -61,3 +61,32 @@ reaped while their subject lives.
 - Scan results attached as referrers (S-008) die with the image, which is correct:
   the normalised scan rows in the metadata store (ADR 0006) remain the queryable
   history until pruned by their own retention.
+
+## Clarification (P-002, 2026-09-05): the cascade cannot defeat protection
+
+The multi-arch rule above — a referrer that is also a child of a live index is
+not deletable by cascade, and the cascade fails closed — is the specific case
+of a general one. It generalises to **every reason a manifest is excluded from
+retention's selectable set**, and it does so because a fuzzer found the hole:
+
+An untagged image carried a **tagged, protected** attestation. An `untagged`
+retention rule selected the image legitimately, and the cascade then deleted
+the protected referrer along with it. Protection was defeated through a path no
+rule ever traversed and no operator would have thought to check, because the
+protected manifest was never selected — it was collateral.
+
+So the rule is: **a cascade member that is excluded for any reason blocks the
+whole selection**, not just the index-child reason. Protected tag, immutable
+tag, index child, and live subject all behave identically here. The plan
+reports the blocked entry with the exclusion that blocked it, so an operator
+sees why an artifact they expected to be swept is still there.
+
+The exception, deliberately, is `ExcludedLiveSubject`: a referrer is excluded
+from *direct* selection because its subject is alive, but when that subject is
+the very thing being deleted, the attachment is exactly what should die with it
+(Q22). Excluding it there would make attachments undeletable.
+
+This is stated here rather than only in `internal/policy` because it is a
+property of the referrer lifecycle, not of the retention evaluator: any future
+caller that deletes a subject and its attachments — a repository purge, a
+migration rollback — inherits the same obligation.

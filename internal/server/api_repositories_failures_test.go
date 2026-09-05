@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/memory"
+	"github.com/steveokay/trove/internal/secretbox"
 	"github.com/steveokay/trove/internal/server"
 )
 
@@ -71,12 +72,45 @@ func (f *reposFaultyStore) DeleteRepository(ctx context.Context, name string) er
 	return f.Store.DeleteRepository(ctx, name)
 }
 
+func (f *reposFaultyStore) PutProxyCredential(ctx context.Context, cred meta.ProxyCredential) error {
+	switch f.fail {
+	case "PutProxyCredential":
+		return errReposStore
+	case "PutProxyCredentialVanished":
+		// Deleted between the handler's read and its write.
+		return meta.NotFound("repository", cred.Repository)
+	case "PutProxyCredentialInvalid":
+		// The store's own refusal past the handler's type check: the entity
+		// stopped being a proxy between the two reads.
+		return meta.Invalid("repository", "the store says no")
+	}
+	return f.Store.PutProxyCredential(ctx, cred)
+}
+
+func (f *reposFaultyStore) DeleteProxyCredential(ctx context.Context, repository string) error {
+	switch f.fail {
+	case "DeleteProxyCredential":
+		return errReposStore
+	case "DeleteProxyCredentialVanished":
+		return meta.NotFound("proxy credential", repository)
+	}
+	return f.Store.DeleteProxyCredential(ctx, repository)
+}
+
+func (f *reposFaultyStore) ProxyCredentialStatus(ctx context.Context, repository string) (meta.ProxyCredentialStatus, error) {
+	if f.fail == "ProxyCredentialStatus" {
+		return meta.ProxyCredentialStatus{}, errReposStore
+	}
+	return f.Store.ProxyCredentialStatus(ctx, repository)
+}
+
 // reposArmedFixture is the fixture with one repository call rigged to fail.
 func reposArmedFixture(t *testing.T, fail string) reposFixture {
 	t.Helper()
 
 	f := newReposFixture(t)
 	reposCreate(t, f, "thing", "hosted", "")
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
 
 	router := server.NewRouter(&server.Guard{
 		Subjects: f.store,
@@ -89,9 +123,10 @@ func reposArmedFixture(t *testing.T, fail string) reposFixture {
 	(&server.Repositories{
 		Store:    &reposFaultyStore{Store: f.store, fail: fail},
 		Bindings: f.store,
+		Keys:     f.keys,
 		Now:      func() time.Time { return reposTime },
 	}).Register(router)
-	return reposFixture{store: f.store, router: router}
+	return reposFixture{store: f.store, router: router, keys: f.keys}
 }
 
 // A store that cannot answer fails closed with a problem document, never a
@@ -139,6 +174,33 @@ func TestReposStoreFailuresAreServerErrors(t *testing.T) {
 			fail: "DeleteRepositoryVanished", method: http.MethodDelete, target: "/api/v1/repositories/thing?confirm=thing",
 			status: http.StatusNotFound,
 		},
+		// The credential routes. A store that cannot say whether a credential
+		// exists must not answer "it does not": an operator told their
+		// upstream login is unset will set it again, over whatever is there.
+		{
+			fail: "ProxyCredentialStatus", method: http.MethodGet, target: "/api/v1/repositories/mirror",
+			status: http.StatusInternalServerError,
+		},
+		{
+			fail: "PutProxyCredential", method: http.MethodPut, target: "/api/v1/repositories/mirror/credentials",
+			body: reposCredentialBody, status: http.StatusInternalServerError,
+		},
+		{
+			fail: "PutProxyCredentialVanished", method: http.MethodPut, target: "/api/v1/repositories/mirror/credentials",
+			body: reposCredentialBody, status: http.StatusNotFound,
+		},
+		{
+			fail: "PutProxyCredentialInvalid", method: http.MethodPut, target: "/api/v1/repositories/mirror/credentials",
+			body: reposCredentialBody, status: http.StatusBadRequest,
+		},
+		{
+			fail: "DeleteProxyCredential", method: http.MethodDelete, target: "/api/v1/repositories/mirror/credentials",
+			status: http.StatusInternalServerError,
+		},
+		{
+			fail: "DeleteProxyCredentialVanished", method: http.MethodDelete,
+			target: "/api/v1/repositories/mirror/credentials", status: http.StatusNotFound,
+		},
 	}
 
 	for _, tt := range tests {
@@ -153,6 +215,45 @@ func TestReposStoreFailuresAreServerErrors(t *testing.T) {
 				t.Errorf("Content-Type = %q, want problem+json", ct)
 			}
 		})
+	}
+}
+
+// reposBrokenSealer stands in for key material that has gone wrong between
+// startup and the write -- a keyring whose only key was removed, say.
+type reposBrokenSealer struct{}
+
+func (reposBrokenSealer) Seal([]byte, secretbox.Context) (string, error) { return "", errReposStore }
+
+// A credential that cannot be encrypted is not stored. Falling back to
+// anything else would be storing a password in the clear, which is the one
+// outcome ADR 0016 exists to prevent -- and the response says nothing about
+// the value that could not be sealed.
+func TestReposCredentialSealFailureStoresNothing(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+
+	router := server.NewRouter(&server.Guard{
+		Subjects: f.store,
+		Bindings: f.store,
+		Credentials: func(r *http.Request) (string, error) {
+			return r.Header.Get("X-Test-Subject"), nil
+		},
+	})
+	(&server.Repositories{
+		Store: f.store, Bindings: f.store, Keys: reposBrokenSealer{},
+		Now: func() time.Time { return reposTime },
+	}).Register(router)
+	broken := reposFixture{store: f.store, router: router}
+
+	rec := broken.do(t, http.MethodPut, "/api/v1/repositories/mirror/credentials", "root", reposCredentialBody)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("credential write with a broken keyring: %d %s, want 500", rec.Code, rec.Body)
+	}
+	requireNoCredential(t, "the seal failure's problem document", "", rec.Body.String())
+	if status, err := f.store.ProxyCredentialStatus(context.Background(), "mirror"); err != nil || status.Set {
+		t.Fatalf("the failed seal stored something: %+v (err %v)", status, err)
 	}
 }
 

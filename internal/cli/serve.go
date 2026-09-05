@@ -130,7 +130,7 @@ func runServe(ctx context.Context, env Env, args []string) error {
 	// Pull statistics ride a batcher so the hot path never writes (R-010).
 	pulls := registry.NewPullBatcher(registry.PullBatcherOptions{Meta: store, Log: log})
 
-	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, cfg.Server.ExternalURL,
+	srv := server.New(cfg, log, buildRouter(store, hosted, login, robots, signer, ring, cfg.Server.ExternalURL,
 		int64(cfg.Registry.MaxManifestBytes), pulls, log))
 	err = srv.Run(ctx)
 	// Stop the reaper after the listener is down and wait it out, so shutdown
@@ -163,8 +163,8 @@ func runServe(ctx context.Context, env Env, args []string) error {
 // endpoints. A test walks the result, so what serve actually serves is pinned
 // rather than assumed.
 func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.PasswordLogin,
-	robots *authn.RobotSecrets, signer *token.Signer, externalURL string, maxManifestBytes int64,
-	pulls registry.PullRecorder, log *slog.Logger,
+	robots *authn.RobotSecrets, signer *token.Signer, ring *secretbox.Keyring,
+	externalURL string, maxManifestBytes int64, pulls registry.PullRecorder, log *slog.Logger,
 ) *server.Router {
 	challenge := server.TokenChallenge(externalURL)
 	credentials := server.Bearer(signer, server.BasicAuth(login, robots))
@@ -189,7 +189,7 @@ func buildRouter(store meta.Store, hosted registry.BlobStore, login *authn.Passw
 	(&server.V2Root{
 		Credentials: credentials, Subjects: store, Challenge: challenge, Log: log,
 	}).Register(router)
-	(&server.Repositories{Store: store, Bindings: store, Log: log}).Register(router)
+	(&server.Repositories{Store: store, Bindings: store, Keys: ring, Log: log}).Register(router)
 	(&registry.Blobs{Store: hosted, Meta: store, Bindings: store, Log: log}).Register(router)
 	(&registry.Manifests{Meta: store, MaxBytes: maxManifestBytes, Pulls: pulls, Log: log}).Register(router)
 	(&registry.Tags{Meta: store, Bindings: store, Log: log}).Register(router)

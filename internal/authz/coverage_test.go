@@ -39,7 +39,6 @@ var pendingVerbs = map[authz.Verb]string{
 	authz.PolicyWrite:       "P-002 retention rules",
 	authz.PolicyApply:       "P-005 apply path",
 	authz.GateOverride:      "S-011 pull gating",
-	authz.ProxyCredentials:  "C-003 upstream credentials",
 	authz.QuotaRead:         "P-009 quota accounting",
 	authz.QuotaWrite:        "P-009 quota accounting",
 	authz.WebhookRead:       "E-002 webhook subscriptions",

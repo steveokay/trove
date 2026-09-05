@@ -24,6 +24,7 @@ import (
 	"github.com/steveokay/trove/internal/authn"
 	"github.com/steveokay/trove/internal/authn/token"
 	"github.com/steveokay/trove/internal/authz"
+	"github.com/steveokay/trove/internal/config"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/memory"
 	"github.com/steveokay/trove/internal/secretbox"
@@ -364,6 +365,219 @@ func TestTokenReplayAfterRevocation(t *testing.T) {
 	}
 	if rec := read(); rec.Code != http.StatusNotFound {
 		t.Fatalf("replay after revocation: %d, want 404 -- the token carries the scope, the bindings are the authority", rec.Code)
+	}
+}
+
+// The upstream credential the two scenarios below hunt for. Both halves are
+// distinctive strings that appear nowhere else in the repository, so finding
+// either in a rendered output is unambiguous rather than a coincidence.
+const (
+	upstreamUser = "robot$privesc-upstream"
+	upstreamPass = "correct-horse-battery-staple-3318"
+)
+
+// TestProxySecretIsUnreachableWithProxyWriteAlone is the §9 scenario driven
+// through the real stack: reading a proxy secret with `proxy:write` alone.
+//
+// `proxy:write` (change a remote) and `proxy:credentials` (see or set its
+// secret) are split because collapsing them is a real incident: the subject
+// who may repoint a proxy at another registry would otherwise be able to read
+// -- or replace -- the password it presents there. TestNonImplications pins
+// that at the decision; this pins it at the endpoints, and goes further than
+// the verb, because ADR 0016 says the API returns set/unset and never a value
+// at any verb at all.
+func TestProxySecretIsUnreachableWithProxyWriteAlone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, name := range []string{"remote-admin", "keeper", "operator"} {
+		if err := store.CreateSubject(ctx, meta.Subject{
+			ID: "u-" + name, Kind: meta.User, Name: name,
+		}); err != nil {
+			t.Fatalf("CreateSubject(%q): %v", name, err)
+		}
+	}
+
+	everyVerb := make([]string, 0, len(authz.AllVerbs()))
+	for _, verb := range authz.AllVerbs() {
+		everyVerb = append(everyVerb, string(verb))
+	}
+	for _, role := range []meta.Role{
+		// Everything that governs a proxy except the verb that governs its
+		// secret.
+		{Name: "remote-admin", Verbs: []string{
+			"repo:list", "repo:read", "repo:configure", "proxy:read", "proxy:write",
+		}},
+		// The secret's verb and nothing else useful.
+		{Name: "keeper", Verbs: []string{"repo:list", "proxy:credentials"}},
+		// And the subject that holds the entire vocabulary, so the absence
+		// below cannot be explained by a missing grant.
+		{Name: "operator", Verbs: everyVerb},
+	} {
+		if err := store.CreateRole(ctx, role); err != nil {
+			t.Fatalf("CreateRole(%q): %v", role.Name, err)
+		}
+	}
+	for _, name := range []string{"remote-admin", "keeper", "operator"} {
+		for i, scope := range []string{"*", "system"} {
+			if err := store.CreateBinding(ctx, meta.Binding{
+				ID: name + "-" + scope[:1] + string(rune('0'+i)), PrincipalKind: meta.PrincipalSubject,
+				PrincipalID: "u-" + name, Role: name, Scope: scope,
+			}); err != nil {
+				t.Fatalf("CreateBinding(%s, %s): %v", name, scope, err)
+			}
+		}
+	}
+	if _, err := store.CreateRepository(ctx, meta.Repository{
+		Name: "mirror", Type: meta.Proxy,
+		Config: json.RawMessage(`{"upstream":"https://registry-1.docker.io"}`),
+	}); err != nil {
+		t.Fatalf("CreateRepository: %v", err)
+	}
+
+	key, err := secretbox.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	ring, err := secretbox.NewKeyring(key)
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+
+	router := server.NewRouter(&server.Guard{
+		Subjects: store, Bindings: store,
+		Credentials: func(r *http.Request) (string, error) {
+			return r.Header.Get("X-Test-Subject"), nil
+		},
+		Challenge: func(*http.Request) string { return `Bearer realm="trove"` },
+	})
+	(&server.Repositories{Store: store, Bindings: store, Keys: ring}).Register(router)
+
+	do := func(method, target, as, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("X-Test-Subject", as)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	credentialBody := `{"username": "` + upstreamUser + `", "password": "` + upstreamPass + `"}`
+
+	// The secret exists, written by the only verb that may write it.
+	if rec := do(http.MethodPut, "/api/v1/repositories/mirror/credentials", "keeper", credentialBody); rec.Code != http.StatusNoContent {
+		t.Fatalf("keeper setting the credential: %d %s", rec.Code, rec.Body)
+	}
+	sealed, err := store.GetProxyCredential(ctx, "mirror")
+	if err != nil {
+		t.Fatalf("GetProxyCredential: %v", err)
+	}
+
+	// proxy:write cannot replace it, and cannot remove it either -- removal is
+	// the other half of controlling what a proxy authenticates as.
+	for _, tt := range []struct{ method, body string }{
+		{http.MethodPut, `{"username": "attacker", "password": "attacker"}`},
+		{http.MethodDelete, ""},
+	} {
+		rec := do(tt.method, "/api/v1/repositories/mirror/credentials", "remote-admin", tt.body)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s credentials with proxy:write alone: %d %s, want 403", tt.method, rec.Code, rec.Body)
+		}
+	}
+	after, err := store.GetProxyCredential(ctx, "mirror")
+	if err != nil || after.Sealed != sealed.Sealed {
+		t.Fatalf("the refused writes changed the stored credential (err %v)", err)
+	}
+
+	// And no read path yields it -- not for proxy:write, not for the verb that
+	// wrote it, not for a subject holding every verb in the vocabulary.
+	reads := []struct{ what, method, target, body string }{
+		{"the repository resource", http.MethodGet, "/api/v1/repositories/mirror", ""},
+		{"the repository listing", http.MethodGet, "/api/v1/repositories", ""},
+	}
+	for _, as := range []string{"remote-admin", "keeper", "operator"} {
+		for _, read := range reads {
+			rec := do(read.method, read.target, as, read.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s as %s: %d %s", read.what, as, rec.Code, rec.Body)
+			}
+			requireNoUpstreamSecret(t, read.what+" as "+as, rec.Body.String(), sealed.Sealed)
+		}
+	}
+}
+
+// TestConfigDumpsCarryNoSealedSecret is C-003's "config dump scanned clean".
+//
+// Upstream credentials never enter the configuration -- they live in the
+// metadata store, sealed -- so what this holds is the machinery that would
+// catch it if one ever did: the two renderers an operator or a support path
+// can reach, over a configuration whose secret-bearing fields have been filled
+// with a real sealed value and a real password. There is deliberately no
+// unredacted renderer to test (internal/config/redact.go), which is why these
+// two are the whole surface.
+//
+// The support bundle (E-011) does not exist yet. When it lands it inherits
+// this obligation and needs its own scan: ADR 0016 names the bundle alongside
+// the config dump, and a bundle that prints `trove_r_`, `trove_p_`, or a `v1:`
+// value is the same disclosure by another route.
+func TestConfigDumpsCarryNoSealedSecret(t *testing.T) {
+	t.Parallel()
+
+	key, err := secretbox.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	ring, err := secretbox.NewKeyring(key)
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+	sealed, err := ring.Seal([]byte(upstreamPass), secretbox.ProxyCredential("mirror"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	cfg := config.Defaults()
+	// Every field the loader marks `redact:"true"`, filled with something that
+	// must not come back out: a sealed value in one, a live password in the
+	// other.
+	cfg.Database.DSN = "postgres://trove:" + upstreamPass + "@db/trove"
+	cfg.Storage.S3.SecretAccessKey = sealed
+
+	for _, tt := range []struct {
+		what     string
+		rendered string
+	}{
+		{"config.String", cfg.String()},
+		{"config.Explain", cfg.Explain()},
+	} {
+		requireNoUpstreamSecret(t, tt.what, tt.rendered, sealed)
+		if !strings.Contains(tt.rendered, config.RedactedPlaceholder) {
+			t.Errorf("%s rendered no redaction placeholder at all:\n%s", tt.what, tt.rendered)
+		}
+	}
+}
+
+// requireNoUpstreamSecret asserts that a rendered output carries no part of an
+// upstream credential: neither half of the pair, the sealed value itself, nor
+// the `v1:` prefix every sealed value starts with (ADR 0016).
+//
+// The assertion is over the whole output rather than a parsed field. A field
+// nobody thought to check is exactly how this leaks, and a scan of the bytes
+// catches a value arriving through a field added later.
+func requireNoUpstreamSecret(t *testing.T, where, rendered, sealed string) {
+	t.Helper()
+
+	for _, forbidden := range []struct{ what, value string }{
+		{"the password", upstreamPass},
+		{"the username", upstreamUser},
+		{"the sealed value", sealed},
+		{"a sealed-value prefix", secretbox.Version + ":"},
+	} {
+		if forbidden.value != "" && strings.Contains(rendered, forbidden.value) {
+			t.Errorf("%s leaked %s:\n%s", where, forbidden.what, rendered)
+		}
 	}
 }
 

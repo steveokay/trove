@@ -189,6 +189,103 @@ func scanConfigRevision(rows *sql.Rows) (meta.ConfigRevision, error) {
 	return revision, nil
 }
 
+// --- proxy credentials ---
+
+// PutProxyCredential stores or replaces a proxy repository's sealed upstream
+// credential. The type check and the write share a transaction, so a
+// repository converted or deleted between the two cannot leave a credential
+// behind on something that is no longer a proxy.
+func (s *Store) PutProxyCredential(ctx context.Context, cred meta.ProxyCredential) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if cred.Sealed == "" {
+		return meta.Invalid("sealed", "must not be empty")
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		owner, err := s.repository(ctx, tx, cred.Repository)
+		if err != nil {
+			return err
+		}
+		if owner.Type != meta.Proxy {
+			return meta.Invalid("repository",
+				fmt.Sprintf("repository %q is a %s, not a proxy: only a proxy authenticates to an upstream",
+					cred.Repository, owner.Type))
+		}
+		_, err = sqlutil.Execute(ctx, tx,
+			`INSERT INTO proxy_credentials (repo_name, sealed, rotated_at) VALUES ($1, $2, $3)
+			 ON CONFLICT (repo_name) DO UPDATE SET
+			     sealed = excluded.sealed,
+			     rotated_at = excluded.rotated_at`,
+			cred.Repository, cred.Sealed, sqlutil.Millis(cred.RotatedAt))
+		return err
+	})
+}
+
+// GetProxyCredential returns the sealed credential. See the interface: this is
+// the one method that returns a stored secret, and the proxy client is its
+// only caller.
+func (s *Store) GetProxyCredential(ctx context.Context, repository string) (meta.ProxyCredential, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.ProxyCredential{}, err
+	}
+
+	var (
+		cred    meta.ProxyCredential
+		rotated sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT repo_name, sealed, rotated_at FROM proxy_credentials WHERE repo_name = $1`,
+		repository).Scan(&cred.Repository, &cred.Sealed, &rotated)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return meta.ProxyCredential{}, meta.NotFound("proxy credential", repository)
+	case err != nil:
+		return meta.ProxyCredential{}, fmt.Errorf("scan proxy credential: %w", err)
+	}
+	cred.RotatedAt = sqlutil.AsTime(rotated)
+	return cred, nil
+}
+
+// ProxyCredentialStatus reports set/unset and the rotation time, and selects
+// no column that could carry the value.
+func (s *Store) ProxyCredentialStatus(ctx context.Context, repository string) (meta.ProxyCredentialStatus, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.ProxyCredentialStatus{}, err
+	}
+
+	status := meta.ProxyCredentialStatus{Repository: repository}
+	var rotated sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT rotated_at FROM proxy_credentials WHERE repo_name = $1`, repository).Scan(&rotated)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return status, nil
+	case err != nil:
+		return meta.ProxyCredentialStatus{}, fmt.Errorf("scan proxy credential status: %w", err)
+	}
+	status.Set = true
+	status.RotatedAt = sqlutil.AsTime(rotated)
+	return status, nil
+}
+
+// DeleteProxyCredential removes a repository's credential.
+func (s *Store) DeleteProxyCredential(ctx context.Context, repository string) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+
+	affected, err := sqlutil.Execute(ctx, s.db, `DELETE FROM proxy_credentials WHERE repo_name = $1`, repository)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return meta.NotFound("proxy credential", repository)
+	}
+	return nil
+}
+
 // DeleteRepository removes a repository entity and everything stored under it.
 //
 // Content is keyed by full name and no longer holds a key to this row (0004),
@@ -197,8 +294,9 @@ func scanConfigRevision(rows *sql.Rows) (meta.ConfigRevision, error) {
 // them through the keys 0004 kept, which is why those two tables are not
 // listed here. Membership rows still cascade from the repositories row, so a
 // group cannot resolve to an entity that is gone, and configuration history
-// cascades with them (0005): a repository created at this name afterwards is a
-// different repository and must not inherit a predecessor's lineage.
+// (0005) and the upstream credential (0007) cascade with them: a repository
+// created at this name afterwards is a different repository and must inherit
+// neither a predecessor's lineage nor its password.
 //
 // It is one transaction: an entity deleted without its content would leave
 // content nothing can route to, and content deleted without its entity would

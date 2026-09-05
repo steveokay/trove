@@ -66,6 +66,51 @@ type ConfigRevision struct {
 	At time.Time
 }
 
+// ProxyCredential is a proxy repository's upstream credential at rest.
+//
+// It is modelled the way the hashed credentials in credentials.go are: the
+// field is named for what it actually holds, and what it holds is never a
+// plaintext. Sealed is a complete secretbox value --
+// "v1:<key-id>:<base64(nonce ‖ ciphertext)>" -- produced under the associated
+// data secretbox.ProxyCredential(Repository), so a row lifted into another
+// repository fails to open rather than decrypting into the wrong upstream
+// (ADR 0016).
+//
+// The difference from a password verifier is that this one has to come back:
+// the proxy client needs the username and password to authenticate upstream.
+// That is why the value is sealed rather than hashed, and why exactly one
+// method returns it -- see GetProxyCredential.
+type ProxyCredential struct {
+	// Repository is the proxy entity the credential belongs to. It is also
+	// half of the associated data, which is what binds the ciphertext here.
+	Repository string
+	// Sealed is the encrypted credential, in secretbox's stored form. It is
+	// opaque to the store: nothing in this package encrypts, decrypts, or
+	// inspects it.
+	Sealed string
+	// RotatedAt is when the credential was last written. The caller supplies
+	// it: no store calls time.Now (§7).
+	RotatedAt time.Time
+}
+
+// ProxyCredentialStatus is everything a read path may learn about an upstream
+// credential: whether one is set, and when it was last written.
+//
+// It is a separate type from ProxyCredential rather than the same type with
+// the value blanked out, because a blanked field is one forgotten assignment
+// away from being populated. There is no field here that could hold a secret,
+// so a handler that renders this cannot leak one however it is written -- which
+// is C-003's acceptance criterion made structural rather than remembered.
+type ProxyCredentialStatus struct {
+	// Repository is the entity the status is about.
+	Repository string
+	// Set reports whether a credential is stored.
+	Set bool
+	// RotatedAt is when it was last written, or the zero time when Set is
+	// false.
+	RotatedAt time.Time
+}
+
 // GroupMember is one entry in a group's ordered member list. Position is
 // explicit because group resolution is first-match-wins and order must never
 // be implicit (ADR 0005).

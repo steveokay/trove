@@ -436,6 +436,21 @@ func Rules() []Rule {
 			Mode: Transitive,
 		},
 		{
+			Name: "retention-evaluator-reaches-no-state",
+			Reason: "ADR 0010 / CLAUDE.md section 7: Evaluate(inventory, rules, now) is pure. An evaluator that can read state can disagree with the snapshot it was handed, and once it can, approving a dry-run plan stops meaning that the approved deletions are the ones that happen. " +
+				"Standard-library I/O is not listed here and cannot be: fmt reaches os transitively, so every package would violate such a rule. The file-scoped import allowlist in internal/policy/purity_test.go carries that half, at a granularity archtest cannot express -- which also lets P-005's apply path live in this package without weakening either check.",
+			From: []string{pkg("internal/policy")},
+			Forbidden: []string{
+				pkg("internal/meta") + "/...",
+				pkg("internal/blob") + "/...",
+				pkg("internal/registry") + "/...",
+				pkg("internal/repo") + "/...",
+				pkg("internal/proxy") + "/...",
+				pkg("internal/server") + "/...",
+			},
+			Mode: Transitive,
+		},
+		{
 			Name:   "authz-does-no-io",
 			Reason: "ADR 0001 / Z-008: Decide is pure. An I/O dependency in the decision path is a decision that can fail open, time out, or vary between the check and the listing.",
 			From:   []string{pkg("internal/authz") + "/..."},

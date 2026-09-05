@@ -41,6 +41,11 @@ func Run(t *testing.T, f Factory) {
 		{"ConfigHistoryRecordsTheSupersededRevision", testConfigHistoryRecordsTheSupersededRevision},
 		{"ConfigHistoryAccumulatesInVersionOrder", testConfigHistoryAccumulatesInVersionOrder},
 		{"ConfigHistoryDiesWithTheRepository", testConfigHistoryDiesWithTheRepository},
+		{"ProxyCredentialRoundTrip", testProxyCredentialRoundTrip},
+		{"ProxyCredentialStatusNeverCarriesTheValue", testProxyCredentialStatusNeverCarriesTheValue},
+		{"ProxyCredentialRotationReplaces", testProxyCredentialRotationReplaces},
+		{"ProxyCredentialRequiresAProxy", testProxyCredentialRequiresAProxy},
+		{"ProxyCredentialDiesWithTheRepository", testProxyCredentialDiesWithTheRepository},
 		{"ListRepositoriesFiltersByVisibility", testListRepositoriesFiltersByVisibility},
 		{"ListRepositoriesPaginates", testListRepositoriesPaginates},
 		{"ListRepositoriesPaginatesUnderFiltering", testListRepositoriesPaginatesUnderFiltering},
@@ -442,6 +447,171 @@ func testRepositoryConfigIsCopied(t *testing.T, s meta.Store) {
 	}
 	if string(again.Config) != `{"mutate":"me"}` {
 		t.Errorf("Config = %s, want mutation of a returned value to be harmless", again.Config)
+	}
+}
+
+// --- proxy credentials ---
+
+// sealedValue is a stand-in for a real secretbox value. The store treats it as
+// opaque, so its only job is to be recognisable and to carry the `v1:` prefix
+// a disclosure scan looks for.
+const sealedValue = "v1:0123abcd:c2VhbGVkLWNyZWRlbnRpYWw="
+
+func testProxyCredentialRoundTrip(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+
+	if _, err := s.GetProxyCredential(ctx(), "mirror"); !errors.Is(err, meta.ErrNotFound) {
+		t.Fatalf("GetProxyCredential before any write = %v, want ErrNotFound", err)
+	}
+	if err := s.PutProxyCredential(ctx(), meta.ProxyCredential{
+		Repository: "mirror", Sealed: sealedValue, RotatedAt: testTime,
+	}); err != nil {
+		t.Fatalf("PutProxyCredential: %v", err)
+	}
+
+	got, err := s.GetProxyCredential(ctx(), "mirror")
+	if err != nil {
+		t.Fatalf("GetProxyCredential: %v", err)
+	}
+	if got.Repository != "mirror" || got.Sealed != sealedValue {
+		t.Errorf("GetProxyCredential = %+v, want the sealed value to round-trip byte for byte", got)
+	}
+	if !got.RotatedAt.Equal(testTime) {
+		t.Errorf("RotatedAt = %s, want the caller's time %s", got.RotatedAt, testTime)
+	}
+
+	if err := s.DeleteProxyCredential(ctx(), "mirror"); err != nil {
+		t.Fatalf("DeleteProxyCredential: %v", err)
+	}
+	if _, err := s.GetProxyCredential(ctx(), "mirror"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetProxyCredential after delete = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteProxyCredential(ctx(), "mirror"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("second DeleteProxyCredential = %v, want ErrNotFound", err)
+	}
+
+	// The repository itself is untouched: removing a credential reverts the
+	// proxy to anonymous, it does not delete the proxy.
+	if _, err := s.GetRepository(ctx(), "mirror"); err != nil {
+		t.Errorf("GetRepository after credential delete: %v", err)
+	}
+}
+
+// The status read is the one every API path uses, and it must be incapable of
+// carrying a value: the assertion is over the whole rendered record, so a
+// field added later that happened to hold the ciphertext would fail here
+// rather than in whatever handler printed it.
+func testProxyCredentialStatusNeverCarriesTheValue(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+
+	unset, err := s.ProxyCredentialStatus(ctx(), "mirror")
+	if err != nil {
+		t.Fatalf("ProxyCredentialStatus before any write: %v", err)
+	}
+	if unset.Set || !unset.RotatedAt.IsZero() {
+		t.Errorf("status before any write = %+v, want unset with no rotation time", unset)
+	}
+
+	// A name no repository uses reports unset rather than ErrNotFound: whether
+	// an entity exists is the repository methods' answer to give (ADR 0003).
+	absent, err := s.ProxyCredentialStatus(ctx(), "no-such-entity")
+	if err != nil {
+		t.Fatalf("ProxyCredentialStatus for an unknown name: %v", err)
+	}
+	if absent.Set {
+		t.Errorf("status for an unknown name = %+v, want unset", absent)
+	}
+
+	if err := s.PutProxyCredential(ctx(), meta.ProxyCredential{
+		Repository: "mirror", Sealed: sealedValue, RotatedAt: testTime,
+	}); err != nil {
+		t.Fatalf("PutProxyCredential: %v", err)
+	}
+
+	status, err := s.ProxyCredentialStatus(ctx(), "mirror")
+	if err != nil {
+		t.Fatalf("ProxyCredentialStatus: %v", err)
+	}
+	if !status.Set || !status.RotatedAt.Equal(testTime) {
+		t.Errorf("status = %+v, want set at %s", status, testTime)
+	}
+	if rendered := fmt.Sprintf("%+v", status); strings.Contains(rendered, "v1:") ||
+		strings.Contains(rendered, sealedValue) {
+		t.Errorf("status renders as %q, which carries the sealed value", rendered)
+	}
+}
+
+func testProxyCredentialRotationReplaces(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+
+	for _, cred := range []meta.ProxyCredential{
+		{Repository: "mirror", Sealed: sealedValue, RotatedAt: testTime},
+		{Repository: "mirror", Sealed: "v1:99998888:cm90YXRlZA==", RotatedAt: updateTime},
+	} {
+		if err := s.PutProxyCredential(ctx(), cred); err != nil {
+			t.Fatalf("PutProxyCredential(%s): %v", cred.Sealed, err)
+		}
+	}
+
+	// Rotation replaces rather than accumulating: a proxy has one upstream and
+	// therefore one credential, and a second row would be one nothing chooses
+	// between.
+	got, err := s.GetProxyCredential(ctx(), "mirror")
+	if err != nil {
+		t.Fatalf("GetProxyCredential: %v", err)
+	}
+	if got.Sealed != "v1:99998888:cm90YXRlZA==" || !got.RotatedAt.Equal(updateTime) {
+		t.Errorf("after rotation = %+v, want the second write", got)
+	}
+}
+
+func testProxyCredentialRequiresAProxy(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "shop", meta.Hosted)
+	mustCreateRepo(t, s, "everything", meta.Group)
+
+	// Only a proxy authenticates to an upstream, so a credential anywhere else
+	// is a mistake worth refusing rather than storing where nothing reads it.
+	for _, name := range []string{"shop", "everything"} {
+		err := s.PutProxyCredential(ctx(), meta.ProxyCredential{
+			Repository: name, Sealed: sealedValue, RotatedAt: testTime,
+		})
+		requireErrIs(t, err, meta.ErrInvalid, "PutProxyCredential on "+name)
+	}
+
+	err := s.PutProxyCredential(ctx(), meta.ProxyCredential{
+		Repository: "nothing-here", Sealed: sealedValue, RotatedAt: testTime,
+	})
+	requireErrIs(t, err, meta.ErrNotFound, "PutProxyCredential on an absent entity")
+
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+	err = s.PutProxyCredential(ctx(), meta.ProxyCredential{Repository: "mirror", RotatedAt: testTime})
+	requireErrIs(t, err, meta.ErrInvalid, "PutProxyCredential with an empty sealed value")
+}
+
+func testProxyCredentialDiesWithTheRepository(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+	if err := s.PutProxyCredential(ctx(), meta.ProxyCredential{
+		Repository: "mirror", Sealed: sealedValue, RotatedAt: testTime,
+	}); err != nil {
+		t.Fatalf("PutProxyCredential: %v", err)
+	}
+	if err := s.DeleteRepository(ctx(), "mirror"); err != nil {
+		t.Fatalf("DeleteRepository: %v", err)
+	}
+
+	// A proxy recreated at this name points at whatever upstream its own
+	// operator chose. Inheriting a predecessor's credential would send
+	// somebody else's password there.
+	mustCreateRepo(t, s, "mirror", meta.Proxy)
+	if _, err := s.GetProxyCredential(ctx(), "mirror"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetProxyCredential after recreation = %v, want ErrNotFound", err)
+	}
+	status, err := s.ProxyCredentialStatus(ctx(), "mirror")
+	if err != nil {
+		t.Fatalf("ProxyCredentialStatus: %v", err)
+	}
+	if status.Set {
+		t.Errorf("status after recreation = %+v, want unset", status)
 	}
 }
 
@@ -2057,6 +2227,16 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		}},
 		{"ListConfigHistory", func() error { _, err := s.ListConfigHistory(ctx, "repo"); return err }},
 		{"DeleteRepository", func() error { return s.DeleteRepository(ctx, "repo") }},
+		// The sealed value is non-empty so the context check, not the argument
+		// check, is the first thing these can fail on.
+		{"PutProxyCredential", func() error {
+			return s.PutProxyCredential(ctx, meta.ProxyCredential{
+				Repository: "repo", Sealed: sealedValue, RotatedAt: testTime,
+			})
+		}},
+		{"GetProxyCredential", func() error { _, err := s.GetProxyCredential(ctx, "repo"); return err }},
+		{"ProxyCredentialStatus", func() error { _, err := s.ProxyCredentialStatus(ctx, "repo"); return err }},
+		{"DeleteProxyCredential", func() error { return s.DeleteProxyCredential(ctx, "repo") }},
 		{"SetGroupMembers", func() error { return s.SetGroupMembers(ctx, "repo", nil) }},
 		{"ListGroupMembers", func() error { _, err := s.ListGroupMembers(ctx, "repo"); return err }},
 		{"PutManifest", func() error {

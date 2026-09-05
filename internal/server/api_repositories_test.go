@@ -14,6 +14,8 @@ import (
 	"github.com/steveokay/trove/internal/authz/verbtest"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/memory"
+	"github.com/steveokay/trove/internal/proxy"
+	"github.com/steveokay/trove/internal/secretbox"
 	"github.com/steveokay/trove/internal/server"
 )
 
@@ -31,9 +33,16 @@ var reposTime = time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
 //	watcher   repo:list alone: sees entities, never a proxy's configuration
 //	prowler   repo:write + repo:read at `*` and system, and nothing else --
 //	          the subject that proves push does not imply administration
+//	keymaster repo:list + proxy:credentials and nothing else: may set and
+//	          remove an upstream credential, may not read one, and may not
+//	          even see the configuration it belongs to
 type reposFixture struct {
 	store  *memory.Store
 	router *server.Router
+	// keys is the fixture's secrets keyring, the same one the handler seals
+	// with. Tests use it to prove what was stored really is the credential --
+	// and, in the AAD probe, that it opens under one repository only.
+	keys *secretbox.Keyring
 }
 
 func newReposFixture(t *testing.T) reposFixture {
@@ -43,7 +52,7 @@ func newReposFixture(t *testing.T) reposFixture {
 	store := memory.New()
 	t.Cleanup(func() { _ = store.Close() })
 
-	subjects := []string{"root", "creator", "keeper", "purger", "watcher", "prowler", "proxyadmin"}
+	subjects := []string{"root", "creator", "keeper", "purger", "watcher", "prowler", "proxyadmin", "keymaster"}
 	for _, name := range subjects {
 		if err := store.CreateSubject(ctx, meta.Subject{ID: "u-" + name, Kind: meta.User, Name: name}); err != nil {
 			t.Fatalf("CreateSubject(%q): %v", name, err)
@@ -62,6 +71,7 @@ func newReposFixture(t *testing.T) reposFixture {
 		{Name: "watcher", Verbs: []string{"repo:list"}},
 		{Name: "pusher", Verbs: []string{"repo:read", "repo:write", "repo:list"}},
 		{Name: "proxyadmin", Verbs: []string{"repo:list", "repo:configure", "proxy:read", "proxy:write"}},
+		{Name: "keymaster", Verbs: []string{"repo:list", "proxy:credentials"}},
 	} {
 		if err := store.CreateRole(ctx, role); err != nil {
 			t.Fatalf("CreateRole(%q): %v", role.Name, err)
@@ -87,7 +97,9 @@ func newReposFixture(t *testing.T) reposFixture {
 	bind("b-watcher", "watcher", "watcher")
 	bind("b-prowler", "prowler", "pusher")
 	bind("b-proxyadmin", "proxyadmin", "proxyadmin")
+	bind("b-keymaster", "keymaster", "keymaster")
 
+	keys := reposKeyring(t)
 	router := server.NewRouter(&server.Guard{
 		Subjects: store,
 		Bindings: store,
@@ -97,10 +109,28 @@ func newReposFixture(t *testing.T) reposFixture {
 		Challenge: func(*http.Request) string { return `Bearer realm="trove"` },
 	})
 	(&server.Repositories{
-		Store: store, Bindings: store, Now: func() time.Time { return reposTime },
+		Store: store, Bindings: store, Keys: keys, Now: func() time.Time { return reposTime },
 	}).Register(router)
 
-	return reposFixture{store: store, router: router}
+	return reposFixture{store: store, router: router, keys: keys}
+}
+
+// reposKeyring builds fresh key material for one fixture. A generated key
+// rather than a fixed one, so nothing in these tests can come to depend on a
+// particular ciphertext: what is asserted is that a value never appears, and
+// that is true of whichever key sealed it.
+func reposKeyring(t *testing.T) *secretbox.Keyring {
+	t.Helper()
+
+	key, err := secretbox.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	ring, err := secretbox.NewKeyring(key)
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+	return ring
 }
 
 func (f reposFixture) do(t *testing.T, method, target, as, body string) *httptest.ResponseRecorder {
@@ -135,6 +165,10 @@ type reposResource struct {
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
 	Config        json.RawMessage `json:"config"`
+	Credential    *struct {
+		Set       bool      `json:"set"`
+		RotatedAt time.Time `json:"rotated_at"`
+	} `json:"credential"`
 }
 
 func reposDecode(t *testing.T, rec *httptest.ResponseRecorder) reposResource {
@@ -754,5 +788,374 @@ func TestReposUnusableNameInPath(t *testing.T) {
 	rec := f.do(t, http.MethodGet, "/api/v1/repositories/NotALegalName", "root", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("illegal name: %d %s, want 400", rec.Code, rec.Body)
+	}
+}
+
+// --- upstream credentials (C-003) ---
+//
+// C-003's acceptance criterion is a negative one -- no read path returns a
+// credential -- so most of what follows probes reads and asserts an absence.
+// The assertions are over whole serialized response bodies rather than over
+// named fields: a field nobody thought to check is exactly how this leaks, and
+// a body-wide scan catches a value that arrives through a field added later.
+
+const (
+	// The fixture's upstream credential. Both halves are distinctive strings
+	// that appear nowhere else, so finding either in a response body is
+	// unambiguous rather than a coincidence.
+	reposCredentialUser = "robot$upstream-fixture"
+	reposCredentialPass = "correct-horse-battery-staple-9271"
+
+	// reposCredentialBody is that pair as a request body, for the tables that
+	// only care that a well-formed write was refused.
+	reposCredentialBody = `{"username": "` + reposCredentialUser + `", "password": "` + reposCredentialPass + `"}`
+)
+
+// reposSetCredential writes the fixture credential as root and requires
+// success, returning the sealed value the store ended up holding.
+func reposSetCredential(t *testing.T, f reposFixture, name string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"username": %q, "password": %q}`, reposCredentialUser, reposCredentialPass)
+	rec := f.do(t, http.MethodPut, "/api/v1/repositories/"+name+"/credentials", "root", body)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("set credential on %s: %d %s", name, rec.Code, rec.Body)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("a credential write answered with a body: %s", rec.Body)
+	}
+
+	// Reaching past the handler to prove the probes below are not vacuous: the
+	// value really is stored, and it really is the one that must not appear
+	// anywhere.
+	stored, err := f.store.GetProxyCredential(context.Background(), name)
+	if err != nil {
+		t.Fatalf("GetProxyCredential: %v", err)
+	}
+	username, password, err := proxy.StoredCredentials{
+		Repository: name, Store: f.store, Keys: f.keys,
+	}.Basic(context.Background())
+	if err != nil {
+		t.Fatalf("Basic: %v", err)
+	}
+	if username != reposCredentialUser || password != reposCredentialPass {
+		t.Fatalf("stored credential opened to (%q, %q), want the pair that was written", username, password)
+	}
+	return stored.Sealed
+}
+
+// requireNoCredential asserts that a response body carries no part of the
+// credential: neither half of the pair, and no sealed value -- the `v1:`
+// prefix ADR 0016 says every stored secret begins with.
+func requireNoCredential(t *testing.T, where, sealed, body string) {
+	t.Helper()
+
+	for _, forbidden := range []struct{ what, value string }{
+		{"the password", reposCredentialPass},
+		{"the username", reposCredentialUser},
+		{"the sealed value", sealed},
+		{"a sealed-value prefix", "v1:"},
+	} {
+		if forbidden.value != "" && strings.Contains(body, forbidden.value) {
+			t.Errorf("%s leaked %s:\n%s", where, forbidden.what, body)
+		}
+	}
+}
+
+// Every read path the repository resource has, probed against a repository
+// that really does hold a credential -- including the two subjects that might
+// plausibly be thought to earn one: proxy:read, and proxy:credentials itself.
+// ADR 0016 is stronger than the verb: the API returns set/unset and a rotation
+// time at every verb, and a value at none.
+func TestReposCredentialsAppearInNoReadPath(t *testing.T) {
+	t.Parallel()
+	verbtest.Positive(t, authz.ProxyCredentials)
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+	sealed := reposSetCredential(t, f, "mirror")
+
+	// The single-entity read, as every subject that can reach it: the operator
+	// holding every verb in the vocabulary, the proxy administrator, the
+	// credential holder itself, and subjects with less.
+	for _, as := range []string{"root", "proxyadmin", "keymaster", "watcher", "keeper"} {
+		rec := f.do(t, http.MethodGet, "/api/v1/repositories/mirror", as, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get as %s: %d %s", as, rec.Code, rec.Body)
+		}
+		requireNoCredential(t, "GET the repository as "+as, sealed, rec.Body.String())
+	}
+
+	// The listing, which carries no configuration at all and must carry no
+	// credential either.
+	listing := f.do(t, http.MethodGet, "/api/v1/repositories", "root", "")
+	if listing.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", listing.Code, listing.Body)
+	}
+	requireNoCredential(t, "the repository listing", sealed, listing.Body.String())
+
+	// The reconfigure echo, which returns the document the caller supplied.
+	echo := f.do(t, http.MethodPut, "/api/v1/repositories/mirror/config", "proxyadmin",
+		`{"config": {"upstream": "https://ghcr.io"}, "expected_version": 1}`)
+	if echo.Code != http.StatusOK {
+		t.Fatalf("reconfigure: %d %s", echo.Code, echo.Body)
+	}
+	requireNoCredential(t, "the config write's echo", sealed, echo.Body.String())
+
+	// And the refusals, which are the paths most likely to echo a request body
+	// back at a client.
+	for _, tt := range []struct{ what, as, body string }{
+		{"a refused write", "proxyadmin", fmt.Sprintf(`{"username": %q, "password": %q}`,
+			reposCredentialUser, reposCredentialPass)},
+		{"a rejected body", "root", fmt.Sprintf(`{"username": %q, "password": ""}`, reposCredentialUser)},
+		{"unparseable JSON", "root", `{"username": "` + reposCredentialUser + `"`},
+	} {
+		rec := f.do(t, http.MethodPut, "/api/v1/repositories/mirror/credentials", tt.as, tt.body)
+		if rec.Code == http.StatusNoContent {
+			t.Fatalf("%s was accepted: %d %s", tt.what, rec.Code, rec.Body)
+		}
+		requireNoCredential(t, tt.what+"'s problem document", sealed, rec.Body.String())
+	}
+}
+
+// What a read path does return: set/unset and a rotation time, on the same
+// proxy:read decision that serves the configuration. Reading whether a proxy
+// authenticates at all is part of reading how it is configured.
+func TestReposCredentialStatusRidesProxyRead(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+	reposCreate(t, f, "plain", "hosted", "")
+
+	unset := reposDecode(t, f.do(t, http.MethodGet, "/api/v1/repositories/mirror", "root", ""))
+	if unset.Credential == nil || unset.Credential.Set {
+		t.Fatalf("before any write, credential = %+v, want present and unset", unset.Credential)
+	}
+
+	reposSetCredential(t, f, "mirror")
+
+	set := reposDecode(t, f.do(t, http.MethodGet, "/api/v1/repositories/mirror", "root", ""))
+	if set.Credential == nil || !set.Credential.Set {
+		t.Fatalf("after the write, credential = %+v, want set", set.Credential)
+	}
+	if !set.Credential.RotatedAt.Equal(reposTime) {
+		t.Errorf("RotatedAt = %s, want the injected clock %s", set.Credential.RotatedAt, reposTime)
+	}
+
+	// Without proxy:read the whole field is absent, for the reason the config
+	// is: a null would say a credential state exists that the subject may not
+	// see, which is the disclosure omitting it avoids (ADR 0003).
+	hidden := reposDecode(t, f.do(t, http.MethodGet, "/api/v1/repositories/mirror", "watcher", ""))
+	if hidden.Credential != nil {
+		t.Errorf("watcher saw credential = %+v, want the field omitted", hidden.Credential)
+	}
+	// proxy:credentials alone does not buy the configuration, and so does not
+	// buy the status either: the verb gates writing, not reading.
+	byVerb := reposDecode(t, f.do(t, http.MethodGet, "/api/v1/repositories/mirror", "keymaster", ""))
+	if byVerb.Credential != nil {
+		t.Errorf("keymaster saw credential = %+v, want the field omitted", byVerb.Credential)
+	}
+
+	// A hosted entity has no upstream, so it has no credential field at all.
+	hosted := reposDecode(t, f.do(t, http.MethodGet, "/api/v1/repositories/plain", "root", ""))
+	if hosted.Credential != nil {
+		t.Errorf("hosted entity carried credential = %+v", hosted.Credential)
+	}
+}
+
+// The §9 scenario, at the handler: reaching a proxy secret with proxy:write
+// alone. proxy:credentials is implied by nothing (ADR 0002), so the subject
+// who may repoint this proxy at another registry still cannot touch the
+// password it presents there.
+func TestReposCredentialsNotImpliedByProxyWrite(t *testing.T) {
+	t.Parallel()
+	verbtest.Negative(t, authz.ProxyCredentials)
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+
+	body := fmt.Sprintf(`{"username": %q, "password": %q}`, reposCredentialUser, reposCredentialPass)
+	for _, tt := range []struct{ method, body string }{
+		{http.MethodPut, body},
+		{http.MethodDelete, ""},
+	} {
+		// proxyadmin holds repo:configure, proxy:read and proxy:write: every
+		// verb that governs this repository except the one that governs its
+		// secret. The refusal is 403 rather than 404 because repo:list already
+		// disclosed the entity.
+		rec := f.do(t, tt.method, "/api/v1/repositories/mirror/credentials", "proxyadmin", tt.body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s credentials as proxyadmin: %d %s, want 403", tt.method, rec.Code, rec.Body)
+		}
+	}
+	// Nothing was written by the refusal.
+	if status, err := f.store.ProxyCredentialStatus(context.Background(), "mirror"); err != nil || status.Set {
+		t.Fatalf("after the refusals, status = %+v (err %v), want unset", status, err)
+	}
+
+	// And the verb on its own is enough: keymaster holds repo:list and
+	// proxy:credentials and nothing else.
+	rec := f.do(t, http.MethodPut, "/api/v1/repositories/mirror/credentials", "keymaster", body)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("set credential as keymaster: %d %s, want 204", rec.Code, rec.Body)
+	}
+}
+
+// Setting, rotating, and removing one. Removal reverts the proxy to anonymous
+// and leaves the repository alone.
+func TestReposCredentialLifecycle(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+
+	first := reposSetCredential(t, f, "mirror")
+	second := reposSetCredential(t, f, "mirror")
+	if first == second {
+		// A fresh nonce per seal, so the same pair written twice produces
+		// different bytes: an observer cannot tell that two rows hold the same
+		// credential (ADR 0016).
+		t.Errorf("rotating the same pair produced an identical sealed value")
+	}
+
+	removed := f.do(t, http.MethodDelete, "/api/v1/repositories/mirror/credentials", "root", "")
+	if removed.Code != http.StatusNoContent {
+		t.Fatalf("delete credential: %d %s", removed.Code, removed.Body)
+	}
+	status, err := f.store.ProxyCredentialStatus(context.Background(), "mirror")
+	if err != nil {
+		t.Fatalf("ProxyCredentialStatus: %v", err)
+	}
+	if status.Set {
+		t.Errorf("status after delete = %+v, want unset", status)
+	}
+	// The repository is untouched: removing a credential is not deleting a
+	// proxy.
+	if rec := f.do(t, http.MethodGet, "/api/v1/repositories/mirror", "root", ""); rec.Code != http.StatusOK {
+		t.Errorf("get after credential delete: %d %s", rec.Code, rec.Body)
+	}
+	// A second delete has nothing to remove, and says so.
+	again := f.do(t, http.MethodDelete, "/api/v1/repositories/mirror/credentials", "root", "")
+	if again.Code != http.StatusNotFound {
+		t.Errorf("second delete: %d %s, want 404", again.Code, again.Body)
+	}
+}
+
+// Only a proxy authenticates to an upstream, so the route refuses every other
+// entity type -- and an entity that does not exist at all answers the way an
+// unreadable one does (ADR 0003).
+func TestReposCredentialsRequireAProxy(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "plain", "hosted", "")
+	reposCreate(t, f, "everything", "group", "")
+
+	body := fmt.Sprintf(`{"username": %q, "password": %q}`, reposCredentialUser, reposCredentialPass)
+	for _, name := range []string{"plain", "everything"} {
+		for _, method := range []string{http.MethodPut, http.MethodDelete} {
+			sent := ""
+			if method == http.MethodPut {
+				sent = body
+			}
+			rec := f.do(t, method, "/api/v1/repositories/"+name+"/credentials", "root", sent)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s credentials on %s: %d %s, want 400", method, name, rec.Code, rec.Body)
+			}
+		}
+	}
+
+	absent := f.do(t, http.MethodPut, "/api/v1/repositories/nothing-here/credentials", "root", body)
+	if absent.Code != http.StatusNotFound {
+		t.Errorf("credential write on an absent entity: %d %s, want 404", absent.Code, absent.Body)
+	}
+}
+
+// Both halves are required. A credential with one of them missing
+// authenticates as nobody and comes back from the upstream as a 401 that reads
+// like a wrong password rather than a missing one.
+func TestReposCredentialValidation(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+
+	for _, tt := range []struct{ what, body string }{
+		{"not JSON at all", `nope`},
+		{"an empty object", `{}`},
+		{"no password", `{"username": "robot"}`},
+		{"no username", `{"password": "s3cret"}`},
+		{"an oversized body", `{"username": "robot", "password": "` + strings.Repeat("a", 1<<21) + `"}`},
+	} {
+		rec := f.do(t, http.MethodPut, "/api/v1/repositories/mirror/credentials", "root", tt.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s, want 400", tt.what, rec.Code, rec.Body)
+		}
+	}
+	if status, err := f.store.ProxyCredentialStatus(context.Background(), "mirror"); err != nil || status.Set {
+		t.Fatalf("a refused body still wrote something: %+v (err %v)", status, err)
+	}
+}
+
+// There is no endpoint that returns a credential, so there is none to
+// authorize. The route table is what proves it: a GET added here later would
+// fail this walk before it could serve anything.
+func TestReposCredentialsHaveNoReadRoute(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	found := 0
+	for _, route := range f.router.Routes() {
+		if !strings.HasSuffix(route.Pattern, "/credentials") {
+			continue
+		}
+		found++
+		if route.Method != http.MethodPut && route.Method != http.MethodDelete {
+			t.Errorf("%s %s: the credential resource is write-only (ADR 0016)", route.Method, route.Pattern)
+		}
+		if route.Permission.Verb != authz.ProxyCredentials {
+			t.Errorf("%s %s is guarded by %q, want proxy:credentials",
+				route.Method, route.Pattern, route.Permission.Verb)
+		}
+	}
+	if found != 2 {
+		t.Fatalf("found %d credential routes, want the write and the delete", found)
+	}
+	// And the mux agrees: nothing answers a GET there.
+	if rec := f.do(t, http.MethodGet, "/api/v1/repositories/mirror/credentials", "root", ""); rec.Code == http.StatusOK {
+		t.Errorf("GET credentials answered 200: %s", rec.Body)
+	}
+}
+
+// A deployment with no key material must not store a password in the clear. It
+// cannot happen through serve, which loads or creates a keyring before it
+// builds the router, so the refusal is the last line of defence rather than
+// the first.
+func TestReposCredentialWriteWithoutAKeyringRefuses(t *testing.T) {
+	t.Parallel()
+
+	f := newReposFixture(t)
+	reposCreate(t, f, "mirror", "proxy", reposProxyConfig)
+
+	router := server.NewRouter(&server.Guard{
+		Subjects: f.store,
+		Bindings: f.store,
+		Credentials: func(r *http.Request) (string, error) {
+			return r.Header.Get("X-Test-Subject"), nil
+		},
+	})
+	(&server.Repositories{
+		Store: f.store, Bindings: f.store, Now: func() time.Time { return reposTime },
+	}).Register(router)
+	keyless := reposFixture{store: f.store, router: router}
+
+	body := fmt.Sprintf(`{"username": %q, "password": %q}`, reposCredentialUser, reposCredentialPass)
+	rec := keyless.do(t, http.MethodPut, "/api/v1/repositories/mirror/credentials", "root", body)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("credential write with no keyring: %d %s, want 500", rec.Code, rec.Body)
+	}
+	if status, err := f.store.ProxyCredentialStatus(context.Background(), "mirror"); err != nil || status.Set {
+		t.Fatalf("the refused write stored something: %+v (err %v)", status, err)
 	}
 }

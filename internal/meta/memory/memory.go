@@ -43,6 +43,12 @@ type Store struct {
 	// a different repository (ADR 0005).
 	configHistory map[string][]meta.ConfigRevision
 
+	// Sealed upstream credentials, one per proxy entity. The value is opaque
+	// here as it is in the database engines: this store no more decrypts than
+	// a column does, so a test running against it exercises the same
+	// separation production does (ADR 0016).
+	proxyCredentials map[string]meta.ProxyCredential
+
 	// Content is keyed by repository, so deleting a repository cannot
 	// accidentally reach another's manifests.
 	manifests map[string]map[meta.Digest]meta.Manifest
@@ -98,9 +104,10 @@ func New() *Store {
 // newEmpty returns a store with nothing in it at all.
 func newEmpty() *Store {
 	return &Store{
-		repos:         make(map[string]meta.Repository),
-		members:       make(map[string][]meta.GroupMember),
-		configHistory: make(map[string][]meta.ConfigRevision),
+		repos:            make(map[string]meta.Repository),
+		members:          make(map[string][]meta.GroupMember),
+		configHistory:    make(map[string][]meta.ConfigRevision),
+		proxyCredentials: make(map[string]meta.ProxyCredential),
 
 		manifests: make(map[string]map[meta.Digest]meta.Manifest),
 		refs:      make(map[string]map[meta.Digest][]meta.ManifestRef),
@@ -292,8 +299,103 @@ func (s *Store) ListConfigHistory(ctx context.Context, name string) ([]meta.Conf
 	return out, nil
 }
 
+// --- proxy credentials ---
+
+// PutProxyCredential stores or replaces a proxy repository's sealed upstream
+// credential.
+func (s *Store) PutProxyCredential(ctx context.Context, cred meta.ProxyCredential) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if cred.Sealed == "" {
+		return meta.Invalid("sealed", "must not be empty")
+	}
+	owner, ok := s.repos[cred.Repository]
+	if !ok {
+		return meta.NotFound("repository", cred.Repository)
+	}
+	if owner.Type != meta.Proxy {
+		return meta.Invalid("repository",
+			fmt.Sprintf("repository %q is a %s, not a proxy: only a proxy authenticates to an upstream",
+				cred.Repository, owner.Type))
+	}
+
+	s.proxyCredentials[cred.Repository] = cred
+	return nil
+}
+
+// GetProxyCredential returns the sealed credential. See meta.ProxyCredentialStore:
+// this is the one method that returns a stored secret, and the proxy client is
+// its only caller.
+func (s *Store) GetProxyCredential(ctx context.Context, repository string) (meta.ProxyCredential, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.ProxyCredential{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.ProxyCredential{}, err
+	}
+
+	cred, ok := s.proxyCredentials[repository]
+	if !ok {
+		return meta.ProxyCredential{}, meta.NotFound("proxy credential", repository)
+	}
+	return cred, nil
+}
+
+// ProxyCredentialStatus reports set/unset and the rotation time. It reads the
+// stored credential's fields one by one rather than copying the record, so
+// there is no assignment here that could ever carry the value out.
+func (s *Store) ProxyCredentialStatus(ctx context.Context, repository string) (meta.ProxyCredentialStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.ProxyCredentialStatus{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.ProxyCredentialStatus{}, err
+	}
+
+	status := meta.ProxyCredentialStatus{Repository: repository}
+	if cred, ok := s.proxyCredentials[repository]; ok {
+		status.Set = true
+		status.RotatedAt = cred.RotatedAt
+	}
+	return status, nil
+}
+
+// DeleteProxyCredential removes a repository's credential.
+func (s *Store) DeleteProxyCredential(ctx context.Context, repository string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if _, ok := s.proxyCredentials[repository]; !ok {
+		return meta.NotFound("proxy credential", repository)
+	}
+	delete(s.proxyCredentials, repository)
+	return nil
+}
+
 // DeleteRepository removes a repository, its membership rows, its
-// configuration history, and every piece of content stored under it.
+// configuration history, its upstream credential, and every piece of content
+// stored under it.
 func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -315,6 +417,11 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 	// afterwards is a different repository (ADR 0005). The database engines
 	// get the same effect from 0005's cascade.
 	delete(s.configHistory, name)
+	// And so does the credential (0007's cascade), for the sharper version of
+	// the same reason: a proxy recreated at this name points at whatever
+	// upstream its own operator chose, and must not arrive holding somebody
+	// else's password for it.
+	delete(s.proxyCredentials, name)
 
 	// Content is keyed by full name, so an entity's content is the name itself
 	// and everything beneath it (ADR 0005). belongsTo is what keeps this from

@@ -19,6 +19,7 @@ import (
 //     impossible for a cache path to reach hosted content (ADR 0009).
 type Store interface {
 	RepositoryStore
+	ProxyCredentialStore
 	ContentStore
 	IdentityStore
 	CredentialStore
@@ -135,15 +136,18 @@ type RepositoryStore interface {
 	ListConfigHistory(ctx context.Context, name string) ([]ConfigRevision, error)
 
 	// DeleteRepository removes a repository entity, its group membership rows,
-	// its configuration history, and every piece of content stored under it --
-	// the name itself and every name beneath it, since `team-a` is the entity
-	// that holds `team-a/api` (ADR 0005). It all happens in one transaction: an
-	// entity that was half deleted would leave content nothing routes to.
+	// its configuration history, its upstream credential, and every piece of
+	// content stored under it -- the name itself and every name beneath it,
+	// since `team-a` is the entity that holds `team-a/api` (ADR 0005). It all
+	// happens in one transaction: an entity that was half deleted would leave
+	// content nothing routes to.
 	//
-	// The history goes with the entity deliberately. A name is free once it is
-	// deleted, and a repository created at that name afterwards is a different
-	// repository: inheriting a predecessor's lineage would attribute somebody
-	// else's upstreams and settings to it.
+	// The history and the credential go with the entity deliberately. A name is
+	// free once it is deleted, and a repository created at that name afterwards
+	// is a different repository: inheriting a predecessor's lineage would
+	// attribute somebody else's upstreams and settings to it, and inheriting
+	// its credential would send somebody else's password to whatever upstream
+	// the new repository names.
 	//
 	// The deletion is immediate and irreversible for hosted content, which is
 	// the decision rather than an oversight (Q16): there is no trash can, and
@@ -158,6 +162,67 @@ type RepositoryStore interface {
 
 	// ListGroupMembers returns a group's members in resolution order.
 	ListGroupMembers(ctx context.Context, group string) ([]GroupMember, error)
+}
+
+// ProxyCredentialStore holds one encrypted upstream credential per proxy
+// repository (ADR 0016, C-003).
+//
+// It is its own interface rather than four more methods on RepositoryStore for
+// the reason CredentialStore is separate from IdentityStore: the read that
+// returns a secret and the read that reports on one are different privileges,
+// and a caller that needs the second should not be handed an interface
+// carrying the first. The admin API declares a slice of the store containing
+// ProxyCredentialStatus and no getter at all, so the handlers that serve
+// repository requests cannot reach a sealed value even by mistake.
+//
+// The store encrypts nothing and decrypts nothing. It stores the opaque value
+// secretbox produced, which keeps every use of key material in one package
+// (ADR 0016's consequence) and keeps this one auditable as "it holds a string
+// it cannot read".
+type ProxyCredentialStore interface {
+	// PutProxyCredential stores or replaces a proxy repository's upstream
+	// credential. The repository must exist and must be a proxy (ErrNotFound,
+	// ErrInvalid): a hosted or group entity has no upstream to authenticate
+	// to, so a credential on one is a mistake worth refusing rather than
+	// storing where nothing will ever read it.
+	//
+	// The sealed value must be non-empty (ErrInvalid). Replacing an existing
+	// credential is not a conflict -- rotation is the expected case -- and the
+	// caller supplies RotatedAt, because no store calls time.Now (§7).
+	PutProxyCredential(ctx context.Context, cred ProxyCredential) error
+
+	// GetProxyCredential returns the sealed credential for a repository, or
+	// ErrNotFound.
+	//
+	// This is the only method in the whole interface that returns a stored
+	// secret, and it exists for exactly one caller: proxy.StoredCredentials,
+	// which opens the value with the keyring immediately before an upstream
+	// request and holds the plaintext no longer than that request (ADR 0016).
+	// Nothing that serves a client request may call it -- not the admin API,
+	// not the support bundle, not the config dump. Those read
+	// ProxyCredentialStatus, which cannot return a value because its type has
+	// no field for one.
+	//
+	// What comes back is still ciphertext. Without the keyfile it is noise,
+	// which is what makes the blast radius of a mistaken caller a leaked
+	// ciphertext rather than a leaked password -- but the rule above is the
+	// protection, and this sentence is not permission to relax it.
+	GetProxyCredential(ctx context.Context, repository string) (ProxyCredential, error)
+
+	// ProxyCredentialStatus reports whether a repository has a credential and
+	// when it was last written. It is the read every API path uses.
+	//
+	// A repository with no credential, and a name no repository uses, both
+	// report Set false rather than ErrNotFound. Whether an entity exists is
+	// the repository methods' answer to give (ADR 0003), and a status call
+	// that could distinguish the two would be a second existence oracle in
+	// the one place that must not become one.
+	ProxyCredentialStatus(ctx context.Context, repository string) (ProxyCredentialStatus, error)
+
+	// DeleteProxyCredential removes a repository's credential, returning
+	// ErrNotFound when there was none. The proxy reverts to anonymous access
+	// on its next upstream request; nothing else about the repository changes.
+	DeleteProxyCredential(ctx context.Context, repository string) error
 }
 
 // ContentStore manages hosted manifests, tags, blobs, and upload sessions.
