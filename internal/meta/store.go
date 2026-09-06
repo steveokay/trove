@@ -473,6 +473,65 @@ type CachedContentStore interface {
 	// finally answers: the row has served its purpose, and leaving it would
 	// grow a table out of every typo anybody ever made.
 	DeleteNegativeEntry(ctx context.Context, repo, reference string) error
+
+	// The eviction half (C-013). It is here rather than in a store of its own
+	// for the reason the leases are: same family, same tables, and a view that
+	// could be wired to a different store than the fill path would be a cache
+	// evicting somebody else's content.
+
+	// CachedUsage reports what cached content occupies, across every proxy or
+	// under one entity. An empty entity means the whole cache, which is the
+	// scope the default budget applies to (Q11).
+	//
+	// It sums the rows rather than measuring the disk: the rows are what
+	// eviction can act on, and a number taken from the filesystem would
+	// include bytes no proxy has a claim to -- which is the orphan sweep's
+	// business, not the budget's.
+	CachedUsage(ctx context.Context, entity string) (CacheUsage, error)
+
+	// ListEvictable returns cached rows in least-recently-used order, oldest
+	// first, across manifests and blobs together: they compete for one budget,
+	// so they are ranked in one order. An empty entity ranks the whole cache.
+	//
+	// The limit bounds the page and is required: a limit of zero or less
+	// returns nothing rather than the whole cache, because a sweep that asked
+	// for "no rows" and was handed millions is a sweep that meant to ask for
+	// something else. Eviction takes what it needs and comes back for more.
+	ListEvictable(ctx context.Context, entity string, limit int) ([]CachedItem, error)
+
+	// DeleteCachedManifest removes a cached manifest and its edges, returning
+	// ErrNotFound when there was none. The payload is the row, so the bytes go
+	// with it.
+	DeleteCachedManifest(ctx context.Context, repo string, digest Digest) error
+
+	// DeleteCachedBlob removes one proxy's claim on a cached blob and reports
+	// how many claims remain across every other proxy.
+	//
+	// The count is what makes eviction safe without a second query and its
+	// race: cached bytes are content-addressed and stored once, so two proxies
+	// that fetched the same layer hold one copy between them, and deleting the
+	// bytes because *this* row went would break the other proxy's cache. The
+	// caller deletes the bytes only when nothing is left holding them, and the
+	// delete-and-count happens in one transaction so nobody can add a claim in
+	// between.
+	DeleteCachedBlob(ctx context.Context, repo string, digest Digest) (remaining int64, err error)
+
+	// CachedBlobClaims reports how many proxy repositories hold a cached blob.
+	// It is what the orphan sweep asks about bytes it found in the cache store:
+	// zero means nothing can serve them, so they are reclaimable.
+	CachedBlobClaims(ctx context.Context, digest Digest) (int64, error)
+
+	// TouchCached records that cached content was served, advancing its LRU
+	// key. The batch is applied in one transaction; an empty batch is a no-op.
+	//
+	// A record naming content that is no longer cached is ignored rather than
+	// inserted: an access is an observation about a row, and a row that has
+	// been evicted since is not one to bring back. That is the difference from
+	// RecordPulls, whose statistics deliberately outlive their content.
+	//
+	// The time never moves backwards, however the batch is ordered, so a
+	// flush that arrives late cannot make hot content look cold.
+	TouchCached(ctx context.Context, accesses []CacheAccess) error
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

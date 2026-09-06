@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/steveokay/trove/internal/meta"
 )
@@ -320,4 +321,217 @@ func (s *Store) deleteCachedContent(entity string) {
 			delete(s.negativeCache, content)
 		}
 	}
+}
+
+// --- eviction (C-013) ------------------------------------------------------
+
+// CachedUsage reports what cached content occupies.
+func (s *Store) CachedUsage(ctx context.Context, entity string) (meta.CacheUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.CacheUsage{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.CacheUsage{}, err
+	}
+
+	var usage meta.CacheUsage
+	for content, manifests := range s.cachedManifests {
+		if !inCacheScope(content, entity) {
+			continue
+		}
+		for _, m := range manifests {
+			usage.ManifestBytes += m.Size
+			usage.Manifests++
+		}
+	}
+	for content, blobs := range s.cachedBlobs {
+		if !inCacheScope(content, entity) {
+			continue
+		}
+		for _, b := range blobs {
+			usage.BlobBytes += b.Size
+			usage.Blobs++
+		}
+	}
+	usage.Bytes = usage.ManifestBytes + usage.BlobBytes
+	return usage, nil
+}
+
+// inCacheScope reports whether a content name falls under an eviction scope. An
+// empty entity is the whole cache.
+func inCacheScope(content, entity string) bool {
+	return entity == "" || belongsTo(content, entity)
+}
+
+// ListEvictable returns cached rows least-recently-used first.
+func (s *Store) ListEvictable(ctx context.Context, entity string, limit int) ([]meta.CachedItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	var items []meta.CachedItem
+	for content, manifests := range s.cachedManifests {
+		if !inCacheScope(content, entity) {
+			continue
+		}
+		for digest, m := range manifests {
+			items = append(items, meta.CachedItem{
+				Repository: content, Digest: digest, Kind: meta.CachedManifestKind,
+				Size: m.Size, LastAccessAt: m.LastAccessAt,
+			})
+		}
+	}
+	for content, blobs := range s.cachedBlobs {
+		if !inCacheScope(content, entity) {
+			continue
+		}
+		for digest, b := range blobs {
+			items = append(items, meta.CachedItem{
+				Repository: content, Digest: digest, Kind: meta.CachedBlobKind,
+				Size: b.Size, LastAccessAt: b.LastAccessAt,
+			})
+		}
+	}
+
+	// Ties are broken by name and digest so the order is total: two rows
+	// touched in the same millisecond must not swap places between calls, or a
+	// sweep's second page could skip a row its first page had already passed.
+	sort.Slice(items, func(i, j int) bool {
+		left, right := items[i], items[j]
+		switch {
+		case !left.LastAccessAt.Equal(right.LastAccessAt):
+			return left.LastAccessAt.Before(right.LastAccessAt)
+		case left.Repository != right.Repository:
+			return left.Repository < right.Repository
+		case left.Digest != right.Digest:
+			return left.Digest < right.Digest
+		default:
+			return left.Kind < right.Kind
+		}
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+// DeleteCachedManifest removes a cached manifest and its edges.
+func (s *Store) DeleteCachedManifest(ctx context.Context, repo string, digest meta.Digest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if _, ok := s.cachedManifests[repo][digest]; !ok {
+		return meta.NotFound("cached manifest", string(digest))
+	}
+	delete(s.cachedManifests[repo], digest)
+	delete(s.cachedRefs[repo], digest)
+	return nil
+}
+
+// DeleteCachedBlob removes one proxy's claim and reports the claims remaining.
+func (s *Store) DeleteCachedBlob(ctx context.Context, repo string, digest meta.Digest) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return 0, err
+	}
+
+	if _, ok := s.cachedBlobs[repo][digest]; !ok {
+		return 0, meta.NotFound("cached blob", string(digest))
+	}
+	delete(s.cachedBlobs[repo], digest)
+	return s.blobClaims(digest), nil
+}
+
+// CachedBlobClaims reports how many proxies hold a cached blob.
+func (s *Store) CachedBlobClaims(ctx context.Context, digest meta.Digest) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return 0, err
+	}
+	return s.blobClaims(digest), nil
+}
+
+// blobClaims counts the rows naming a digest. The lock is held by the caller.
+func (s *Store) blobClaims(digest meta.Digest) int64 {
+	var claims int64
+	for _, blobs := range s.cachedBlobs {
+		if _, ok := blobs[digest]; ok {
+			claims++
+		}
+	}
+	return claims
+}
+
+// TouchCached advances the LRU key of content that was served.
+func (s *Store) TouchCached(ctx context.Context, accesses []meta.CacheAccess) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(accesses) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	for _, access := range accesses {
+		if !access.Kind.Valid() {
+			return meta.Invalid("kind", fmt.Sprintf("unknown cached kind %q", access.Kind))
+		}
+		if access.Digest == "" {
+			return meta.Invalid("digest", "must not be empty")
+		}
+	}
+
+	for _, access := range accesses {
+		switch access.Kind {
+		case meta.CachedManifestKind:
+			m, ok := s.cachedManifests[access.Repository][access.Digest]
+			if !ok || !access.At.After(m.LastAccessAt) {
+				continue
+			}
+			m.LastAccessAt = access.At
+			s.cachedManifests[access.Repository][access.Digest] = m
+		case meta.CachedBlobKind:
+			b, ok := s.cachedBlobs[access.Repository][access.Digest]
+			if !ok || !access.At.After(b.LastAccessAt) {
+				continue
+			}
+			b.LastAccessAt = access.At
+			s.cachedBlobs[access.Repository][access.Digest] = b
+		}
+	}
+	return nil
 }

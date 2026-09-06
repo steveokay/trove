@@ -357,3 +357,207 @@ func (s *Store) DeleteNegativeEntry(ctx context.Context, repo, reference string)
 	}
 	return nil
 }
+
+// --- eviction (C-013) ------------------------------------------------------
+
+// cacheScope compiles an eviction scope into a WHERE fragment and its
+// arguments: an entity's own name plus everything beneath it, or the whole
+// cache when the entity is empty.
+//
+// It is a name range rather than a LIKE for the reason DeleteRepository uses
+// one: `_` is a LIKE wildcard and a legal name character at once, so
+// `LIKE 'team_a/%'` would reach into `teamXa`.
+func cacheScope(entity string, ph sqlutil.Placeholder, from int) (string, []any) {
+	if entity == "" {
+		return "1 = 1", nil
+	}
+	low, high := sqlutil.EntityContentRange(entity)
+	return fmt.Sprintf("(repo_name = %s OR (repo_name >= %s AND repo_name < %s))",
+			ph(from), ph(from+1), ph(from+2)),
+		[]any{entity, low, high}
+}
+
+// CachedUsage reports what cached content occupies.
+func (s *Store) CachedUsage(ctx context.Context, entity string) (meta.CacheUsage, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.CacheUsage{}, err
+	}
+
+	where, args := cacheScope(entity, sqlutil.Dollar, 1)
+	var usage meta.CacheUsage
+	// COALESCE because SUM over no rows is NULL, and an empty cache is a
+	// perfectly ordinary state rather than an error.
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(size), 0), COUNT(*) FROM cached_manifests WHERE `+where,
+		args...).Scan(&usage.ManifestBytes, &usage.Manifests); err != nil {
+		return meta.CacheUsage{}, fmt.Errorf("sum cached manifests: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(size), 0), COUNT(*) FROM cached_blobs WHERE `+where,
+		args...).Scan(&usage.BlobBytes, &usage.Blobs); err != nil {
+		return meta.CacheUsage{}, fmt.Errorf("sum cached blobs: %w", err)
+	}
+	usage.Bytes = usage.ManifestBytes + usage.BlobBytes
+	return usage, nil
+}
+
+// ListEvictable returns cached rows least-recently-used first.
+func (s *Store) ListEvictable(ctx context.Context, entity string, limit int) ([]meta.CachedItem, error) {
+	if err := s.ready(ctx); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	manifestWhere, args := cacheScope(entity, sqlutil.Dollar, 1)
+	blobWhere, blobArgs := cacheScope(entity, sqlutil.Dollar, len(args)+1)
+	args = append(args, blobArgs...)
+	args = append(args, limit)
+
+	// COALESCE on the sort key so both engines agree about a row whose access
+	// time was never written: SQLite sorts NULL first and Postgres sorts it
+	// last, and the safe reading is "coldest", which epoch gives on both.
+	// The tie-breakers make the order total, so a second page cannot skip a
+	// row the first page passed.
+	// The UNION is wrapped rather than ordered directly: neither engine allows
+	// an expression in an ORDER BY over a union, and the sort key has to be an
+	// expression because a row whose access time was never written must sort as
+	// the coldest -- SQLite puts NULL first and Postgres puts it last, and only
+	// COALESCE makes the two agree.
+	//
+	// The tie-breakers after it make the order total, so a second page cannot
+	// skip a row the first page passed.
+	query := `SELECT repo_name, digest, kind, size, last_access_at FROM (
+		    SELECT repo_name, digest, ` + quoteKind(meta.CachedManifestKind) + ` AS kind, size,
+		           last_access_at, COALESCE(last_access_at, 0) AS sort_key
+		    FROM cached_manifests WHERE ` + manifestWhere + `
+		    UNION ALL
+		    SELECT repo_name, digest, ` + quoteKind(meta.CachedBlobKind) + ` AS kind, size,
+		           last_access_at, COALESCE(last_access_at, 0) AS sort_key
+		    FROM cached_blobs WHERE ` + blobWhere + `
+		  ) AS evictable
+		  ORDER BY sort_key, repo_name, digest, kind
+		  LIMIT ` + sqlutil.Dollar(len(args))
+
+	return sqlutil.Collect(ctx, s.db, query, args, func(rows *sql.Rows) (meta.CachedItem, error) {
+		var (
+			item       meta.CachedItem
+			digest     string
+			kind       string
+			lastAccess sql.NullInt64
+		)
+		if err := rows.Scan(&item.Repository, &digest, &kind, &item.Size, &lastAccess); err != nil {
+			return meta.CachedItem{}, err
+		}
+		item.Digest = meta.Digest(digest)
+		item.Kind = meta.CachedKind(kind)
+		item.LastAccessAt = sqlutil.AsTime(lastAccess)
+		return item, nil
+	})
+}
+
+// quoteKind renders a cached kind as a SQL literal. The values are this
+// package's own constants, never anything a request supplies.
+func quoteKind(kind meta.CachedKind) string { return "'" + string(kind) + "'" }
+
+// DeleteCachedManifest removes a cached manifest and its edges.
+func (s *Store) DeleteCachedManifest(ctx context.Context, repo string, digest meta.Digest) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+
+	affected, err := sqlutil.Execute(ctx, s.db,
+		`DELETE FROM cached_manifests WHERE repo_name = $1 AND digest = $2`,
+		repo, string(digest))
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return meta.NotFound("cached manifest", string(digest))
+	}
+	return nil
+}
+
+// DeleteCachedBlob removes one proxy's claim and reports the claims remaining.
+func (s *Store) DeleteCachedBlob(ctx context.Context, repo string, digest meta.Digest) (int64, error) {
+	if err := s.ready(ctx); err != nil {
+		return 0, err
+	}
+
+	var remaining int64
+	err := sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		affected, err := sqlutil.Execute(ctx, tx,
+			`DELETE FROM cached_blobs WHERE repo_name = $1 AND digest = $2`,
+			repo, string(digest))
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return meta.NotFound("cached blob", string(digest))
+		}
+		// In the same transaction as the delete: a claim added between the two
+		// would otherwise let the caller reclaim bytes somebody is about to
+		// serve.
+		return tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM cached_blobs WHERE digest = $1`, string(digest)).Scan(&remaining)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return remaining, nil
+}
+
+// CachedBlobClaims reports how many proxies hold a cached blob.
+func (s *Store) CachedBlobClaims(ctx context.Context, digest meta.Digest) (int64, error) {
+	if err := s.ready(ctx); err != nil {
+		return 0, err
+	}
+
+	var claims int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cached_blobs WHERE digest = $1`, string(digest)).Scan(&claims); err != nil {
+		return 0, fmt.Errorf("count cached blob claims: %w", err)
+	}
+	return claims, nil
+}
+
+// TouchCached advances the LRU key of content that was served.
+func (s *Store) TouchCached(ctx context.Context, accesses []meta.CacheAccess) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if len(accesses) == 0 {
+		return nil
+	}
+	for _, access := range accesses {
+		if !access.Kind.Valid() {
+			return meta.Invalid("kind", fmt.Sprintf("unknown cached kind %q", access.Kind))
+		}
+		if access.Digest == "" {
+			return meta.Invalid("digest", "must not be empty")
+		}
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		for _, access := range accesses {
+			table := "cached_blobs"
+			if access.Kind == meta.CachedManifestKind {
+				table = "cached_manifests"
+			}
+			// The guard keeps the time monotonic: a flush that arrives late
+			// must not make hot content look cold. A row that is gone updates
+			// nothing, which is the point -- an access is an observation about
+			// a row, not a reason to resurrect one.
+			if _, err := sqlutil.Execute(ctx, tx,
+				`UPDATE `+table+` SET last_access_at = $1
+				 WHERE repo_name = $2 AND digest = $3
+				   AND (last_access_at IS NULL OR last_access_at < $4)`,
+				sqlutil.Millis(access.At), access.Repository, string(access.Digest),
+				sqlutil.Millis(access.At)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

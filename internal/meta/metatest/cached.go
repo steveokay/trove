@@ -17,7 +17,7 @@ import (
 // cachedTests are the cached-content cases, kept in their own file for the
 // reason the store keeps them in their own interface.
 func cachedTests() []suiteCase {
-	return []suiteCase{
+	cases := []suiteCase{
 		{"CachedManifestRoundTrip", testCachedManifestRoundTrip},
 		{"CachedManifestEdges", testCachedManifestEdges},
 		{"CachedWritesRequireAProxyEntity", testCachedWritesRequireAProxyEntity},
@@ -37,6 +37,7 @@ func cachedTests() []suiteCase {
 		{"NegativeEntryRequiresAProxyEntity", testNegativeEntryRequiresAProxyEntity},
 		{"NegativeEntriesDieWithTheRepository", testNegativeEntriesDieWithTheRepository},
 	}
+	return append(cases, evictionTests()...)
 }
 
 // accessTime is when cached content was last served: after it was fetched, so

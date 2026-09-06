@@ -2270,6 +2270,16 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		}},
 		{"GetNegativeEntry", func() error { _, err := s.GetNegativeEntry(ctx, "repo", "t"); return err }},
 		{"DeleteNegativeEntry", func() error { return s.DeleteNegativeEntry(ctx, "repo", "t") }},
+		{"CachedUsage", func() error { _, err := s.CachedUsage(ctx, ""); return err }},
+		{"ListEvictable", func() error { _, err := s.ListEvictable(ctx, "", 10); return err }},
+		{"DeleteCachedManifest", func() error { return s.DeleteCachedManifest(ctx, "repo", d) }},
+		{"DeleteCachedBlob", func() error { _, err := s.DeleteCachedBlob(ctx, "repo", d); return err }},
+		{"CachedBlobClaims", func() error { _, err := s.CachedBlobClaims(ctx, d); return err }},
+		{"TouchCached", func() error {
+			return s.TouchCached(ctx, []meta.CacheAccess{
+				{Repository: "repo", Digest: d, Kind: meta.CachedBlobKind, At: testTime},
+			})
+		}},
 		{"PutTag", func() error {
 			return s.PutTag(ctx, meta.Tag{Repository: "repo", Name: "t", Digest: d})
 		}},

@@ -312,6 +312,65 @@ type TagLease struct {
 	Stale bool
 }
 
+// CachedKind says which cached table a row lives in. Eviction ranks manifests
+// and blobs in one order -- they compete for one budget -- so the kind travels
+// with the row that came back.
+type CachedKind string
+
+// The two kinds of cached content.
+const (
+	// CachedManifestKind is a row in cached_manifests, whose bytes are the
+	// payload column itself.
+	CachedManifestKind CachedKind = "manifest"
+	// CachedBlobKind is a row in cached_blobs, whose bytes are in the
+	// cache-rooted blob store.
+	CachedBlobKind CachedKind = "blob"
+)
+
+// Valid reports whether k is a known cached kind.
+func (k CachedKind) Valid() bool {
+	return k == CachedManifestKind || k == CachedBlobKind
+}
+
+// CachedItem is one cached row as eviction sees it: what it is, what it costs,
+// and when it was last wanted (ADR 0008's LRU key).
+type CachedItem struct {
+	Repository   string
+	Digest       Digest
+	Kind         CachedKind
+	Size         int64
+	LastAccessAt time.Time
+}
+
+// CacheUsage is how much space cached content occupies. Manifests and blobs are
+// counted separately because they are reclaimed differently -- a manifest's
+// bytes go with its row, a blob's bytes are shared and outlive it -- and an
+// operator looking at a full cache wants to know which it is.
+type CacheUsage struct {
+	// Bytes is the total, manifests plus blobs.
+	Bytes int64
+	// ManifestBytes and BlobBytes are the halves.
+	ManifestBytes int64
+	BlobBytes     int64
+	// Manifests and Blobs are row counts.
+	Manifests int64
+	Blobs     int64
+}
+
+// CacheAccess is one observation that cached content was served, for the
+// batched LRU touch (C-013).
+//
+// It is the cached twin of PullRecord and exists for the same reason: writing
+// `last_access_at` on the pull path would put a database write in front of
+// every byte served, and the LRU only needs to be approximately right.
+type CacheAccess struct {
+	Repository string
+	Digest     Digest
+	Kind       CachedKind
+	// At is when it was served, on the caller's clock.
+	At time.Time
+}
+
 // NegativeEntry records that an upstream did not have something, so a typo does
 // not hammer it (ADR 0008, C-007).
 //

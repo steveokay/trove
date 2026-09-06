@@ -429,3 +429,52 @@ member returns, and anonymous's against an empty group's.
 it lands it inherits this contract rather than restating it, and the suite gains
 the request-level version of these cases. Coverage 96.3% overall,
 `group_filter.go` at 100%.
+
+## C-013 (part 1) — the store layer eviction will act on
+
+C-013 is split across two commits because the halves are independently
+reviewable: this one adds what the cached tables can answer about themselves,
+and the evictor in `internal/cache` follows. Nothing in this commit deletes
+anything on a schedule; what it adds is the ability to ask.
+
+Six methods, all on the cached family and none of them able to name a hosted
+table (ADR 0009):
+
+- **`CachedUsage(entity)`** sums rows rather than measuring the disk, because
+  the rows are what eviction can act on and a number from the filesystem would
+  include bytes no proxy has a claim to — which is the orphan sweep's business,
+  not the budget's. An empty entity is the whole cache; a named one is a
+  carve-out, matched by name *range* rather than `LIKE`, so `quay` never reaches
+  into `quay2`.
+- **`ListEvictable(entity, limit)`** ranks manifests and blobs in one
+  least-recently-used order, because they compete for one budget. The union is
+  wrapped in a subquery: neither engine allows an expression in an `ORDER BY`
+  over a union, and the sort key has to be `COALESCE(last_access_at, 0)` because
+  SQLite sorts NULL first and Postgres sorts it last — only the coalesce makes
+  the two agree, on the reading that content nobody recorded an access for is
+  the coldest. Name and digest tie-break so the order is total and a second page
+  cannot skip a row the first passed. A limit of zero returns nothing rather
+  than everything.
+- **`DeleteCachedBlob` returns the claims that remain.** Cached bytes are
+  content-addressed and stored once, so two proxies that fetched the same layer
+  hold one copy between them; reclaiming the bytes because *this* row went would
+  break the other proxy's cache. The delete and the count share a transaction,
+  so nobody can add a claim in between — the alternative is a second query and
+  its race.
+- **`CachedBlobClaims`** answers the same question for bytes the orphan sweep
+  finds in the store: zero claims means nothing can serve them.
+- **`DeleteCachedManifest`** takes the row's edges with it; the payload is the
+  row, so the bytes go too.
+- **`TouchCached`** is the batched LRU write C-004 deferred, in the shape R-010
+  established for pull statistics. The time only ever moves forward, so a flush
+  that arrives late cannot make hot content look cold, and an access naming
+  content that has since been evicted updates nothing rather than resurrecting
+  it — which is the deliberate difference from `RecordPulls`, whose statistics
+  outlive their content.
+
+**Still to come in C-013:** `internal/cache`'s sweep (global budget with
+per-proxy carve-outs, breach trigger and schedule), `cache.evicted` events, the
+orphan pass over bytes whose row was never written, the touch batcher that feeds
+`TouchCached` from the serving path, and ADR 0009's proving test — the last of
+which needs an eviction pass to observe, which is why the ADR clarification
+assigned it here rather than to C-004.
