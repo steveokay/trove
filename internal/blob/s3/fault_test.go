@@ -116,13 +116,7 @@ func TestInterruptedUploadLeavesNothingVisible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connection string after restart: %v", err)
 	}
-	after, err := New(ctx, Options{
-		Endpoint: restarted, Bucket: bucket,
-		AccessKeyID: accessKey, SecretAccessKey: secretKey,
-	})
-	if err != nil {
-		t.Fatalf("New after restart: %v", err)
-	}
+	after := openWhenReady(ctx, t, restarted, bucket)
 
 	if _, err := after.Stat(ctx, digest); err == nil {
 		t.Error("an interrupted upload became a visible blob")
@@ -239,5 +233,33 @@ func TestMissingBucketIsNotMistakenForMissingContent(t *testing.T) {
 				t.Errorf("%s = %v, want a failure rather than ErrNotFound", c.name, err)
 			}
 		})
+	}
+}
+
+// openWhenReady opens a store against a container that has just been restarted.
+//
+// container.Start returns when the container is running, which is not when
+// MinIO is answering: for a second or so it refuses every request with "Server
+// not initialized yet". New performs a bucket check, so it is the readiness
+// probe as well as the thing under test -- retrying it until it succeeds is
+// therefore a wait for the service rather than a retry of a flaky assertion,
+// and the failure it reports on timeout is the real one rather than a bare
+// deadline (CLAUDE.md section 9: a flake is fixed, never retried).
+func openWhenReady(ctx context.Context, t *testing.T, endpoint, bucket string) *Store {
+	t.Helper()
+
+	deadline := time.Now().Add(60 * time.Second)
+	for attempt := 1; ; attempt++ {
+		store, err := New(ctx, Options{
+			Endpoint: endpoint, Bucket: bucket,
+			AccessKeyID: accessKey, SecretAccessKey: secretKey,
+		})
+		if err == nil {
+			return store
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("New after restart (%d attempts): %v", attempt, err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

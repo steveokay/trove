@@ -478,3 +478,18 @@ orphan pass over bytes whose row was never written, the touch batcher that feeds
 `TouchCached` from the serving path, and ADR 0009's proving test — the last of
 which needs an eviction pass to observe, which is why the ADR clarification
 assigned it here rather than to C-004.
+
+### Flake fixed alongside (2026-09-06)
+
+`internal/blob/s3`'s `TestInterruptedUploadLeavesNothingVisible` failed CI on
+the C-013 store-layer commit for a reason that had nothing to do with it:
+`container.Start` returns when the container is *running*, which is not when
+MinIO is *answering* — for about a second it refuses every request with "Server
+not initialized yet". The test opened a store immediately afterwards and
+reported the refusal as a failure.
+
+It now polls `New` until the service answers, bounded at 60 seconds and
+reporting the last real error rather than a bare deadline. `New` performs a
+bucket check, so it is the readiness probe as well as the thing under test:
+this is a wait for a service that is starting, not a retry of a flaky assertion
+(§9 draws that line, and only the second kind is forbidden).
