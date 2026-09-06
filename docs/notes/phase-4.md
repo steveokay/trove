@@ -52,3 +52,78 @@ The acceptance criterion is a negative one — "no read path returns a credentia
 
 **Five ADR 0016 ambiguities the agent flagged, all confirmed:** the username is sealed (the ADR said "credentials" without saying which halves); both halves are required non-empty, which is a mild real restriction since some registries accept any username with a PAT as the password; the set/unset status sits behind `proxy:read` rather than `proxy:credentials`, on the grounds that whether a proxy authenticates is part of how it is configured and an operator debugging an upstream 401 should not need the write verb to see it; `DELETE` of an unset credential is 404 rather than an idempotent 204, consistent with the resource's other deletes; and `trove admin rotate-secrets` (ADR 0016's rotation command) still has no task — when it lands it will need a `ListProxyCredentials`, deliberately absent today because nothing needed one. **Reconcile:** serve now threads the keyring into the admin API, without which the two credential routes answer 500 and log the reason. `proxy:credentials` comes off the §9 pending list, leaving 16.
 
+
+## C-004 — Blob/manifest fetch-and-cache by digest
+
+The first task that writes cached content, so most of it is the storage family
+ADR 0006 named and nothing had built yet: `meta.CachedManifest`,
+`CachedManifestRef` and `CachedBlob`, reached only through the new
+`CachedContentStore`, over `cached_manifests` / `cached_manifest_refs` /
+`cached_blobs` in **migration 0008** (both engines, column for column, with the
+`COLLATE "C"` the parity test demands). The rows hold no foreign key to
+`repositories` — content is keyed by full name and the row it needs is its
+*entity*, exactly as 0004 settled for hosted content — so `DeleteRepository`
+sweeps them by name range beside the hosted tables, which is the one operation
+that legitimately spans both families because it is deleting the entity that
+owns them. `last_access_at` is a column and an index from the start: it is what
+C-013 ranks by, and adding the LRU key later would mean a migration over the
+largest tables in the deployment.
+
+**Every cached write requires its entity to be a proxy**, not merely to exist.
+That is the wall that matters here: cached content is *defined* by being
+refillable from an upstream, and a row under a hosted entity would claim
+recoverability the deployment cannot deliver — the only copy of those bytes
+would be sitting in the cache store, where eviction is free to take it. A
+hosted or group entity is `ErrInvalid`, a missing one `ErrNotFound`, and the
+contract suite proves both against all three implementations. A second contract
+case writes the *same digest* as hosted content and as cached content and shows
+each family answers only through its own methods, so a statement in the wrong
+package has no row to reach even before it has no type to name. See the
+ADR 0009 clarification for why the blob-side `HostedRef`/`CachedRef` newtypes
+wait for the first deleting caller instead of landing here.
+
+**The filler** (`internal/proxy/fill.go`) is `Manifest` and `Blob` over a
+per-call `Target` — repository, upstream path, remote name, client — rather
+than a per-repository object, because one process serves many proxies and only
+the cache, the clock and the event sink are shared. Both check the cache first
+and both verify through the client rather than re-verifying: the mismatch error
+*is* `blob.ErrDigestMismatch` (C-002), and one verification with one error is
+what makes a mismatch mean the same thing everywhere. A blob miss streams to
+the client and into an upload session at once, and publishes nothing until the
+stream ends and the whole of it verified — so a client that disconnects
+halfway, an upstream that truncates, and an upstream that lies about its bytes
+all leave the cache exactly as it was. The bytes go in before the row, and that
+asymmetry is deliberate: a row with no bytes is a miss the read path already
+handles, while bytes with no row are invisible to this proxy and wait for the
+eviction sweep's orphan pass — leaking recoverable bytes is the cheaper of the
+two, and neither loses anything irreplaceable, which is the whole difference
+between this path and the hosted one.
+
+**A cache failure is not a pull failure.** The bytes are already correct and
+already in hand; refusing to serve them because the disk or the metadata store
+would not take a copy turns a degraded cache into an outage. Every cache-write
+failure — session refused, write refused, commit refused, row refused, entity
+not a proxy — is logged and served through, and both result types carry a flag
+saying whether the cache actually holds what was served, so the degraded state
+is visible instead of indistinguishable from success. The one exception is a
+cache *read* that fails: that is returned, because falling through to the
+upstream would turn a broken metadata store into a stampede against somebody
+else's registry, which is the failure a pull-through cache exists to prevent.
+
+**Two decisions the ADRs did not settle.** A manifest this registry cannot
+parse is refused rather than cached opaquely — it could not be accounted for,
+gated, or scanned, and the push path refuses the same media types (R-002) — and
+the refusal is `ErrUpstreamUnavailable` through a typed `UnusableContentError`,
+so group resolution treats such a member exactly as it treats one that is down
+(C-011) and the client's sentinel set stays closed and total. And the access
+time is written on fill only: touching on serve is a write on the hot path, so
+it belongs with C-013's batched writer, in the shape R-010 already established
+for pull statistics.
+
+**Not wired into the serving path.** Nothing constructs a `Filler` in `serve`
+yet, because a proxy pull needs a tag to resolve before it needs a digest to
+fetch; C-005 brings the lease and the wiring together. `ListContentNames` also
+still lists hosted content only — what a proxy's catalog should report is a
+decision that belongs with the task that serves proxy pulls, and answering it
+here would have settled it by accident. Coverage 96.1% overall, `fill.go` at
+100%.

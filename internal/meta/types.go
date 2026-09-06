@@ -180,6 +180,90 @@ type Blob struct {
 	CreatedAt time.Time
 }
 
+// CachedManifest is a manifest fetched from an upstream and kept, stored in the
+// cached-content family (ADR 0006) that no hosted code path can reach.
+//
+// It is deliberately a different type from Manifest rather than the same one
+// with a flag. The flag would be data, and data gets miswired; a function that
+// evicts takes cached values and one that deletes hosted content takes hosted
+// ones, so a cache sweep that reached an irreplaceable blob would not compile
+// (ADR 0009 wall 1). The fields overlapping with Manifest are the manifest's
+// own -- they describe the same bytes -- and the two that do not are what make
+// this content recoverable: it was fetched at a moment, from somebody else, and
+// its last use is what eviction ranks it by.
+type CachedManifest struct {
+	// Repository is the full trove content name the manifest was cached under,
+	// e.g. `dockerhub/library/nginx`. Its entity -- the first path segment --
+	// must exist and must be a proxy: cached rows under a hosted entity would
+	// be content nothing could ever refill.
+	Repository string
+
+	// Digest is what the bytes hash to, verified on arrival (ADR 0007). A
+	// cached manifest that did not verify is not stored, so a row here is a
+	// claim that these bytes were correct when they landed.
+	Digest Digest
+
+	// MediaType, ArtifactType, and Subject describe the manifest the same way
+	// they do for hosted content, so the referrers API can answer over cached
+	// content without a second shape to read.
+	MediaType    string
+	ArtifactType string
+	Subject      Digest
+
+	// Payload is the manifest body. Manifests are small and are re-hashed on
+	// read, so they live in the row rather than the blob store -- exactly as
+	// hosted manifests do.
+	Payload []byte
+
+	// Size is the payload length in bytes. It is what the cache budget counts
+	// (C-013).
+	Size int64
+
+	// CachedAt is when the fill happened, on the caller's clock. No store calls
+	// time.Now (§7).
+	CachedAt time.Time
+
+	// LastAccessAt is when the content was last served. It is the LRU key
+	// eviction ranks by (Q11), written on fill and refreshed on serve.
+	LastAccessAt time.Time
+}
+
+// CachedManifestRef is one edge from a cached manifest to content it depends
+// on: a layer, a config, a child manifest, or its subject.
+//
+// It exists separately from ManifestRef for the reason CachedManifest does. The
+// edges of hosted content are the reachability graph garbage collection walks
+// before it deletes something irreplaceable (ADR 0010); these edges answer a
+// different question -- what else this fill brought in -- and a single type
+// would be a seam through which one traversal could be handed the other's
+// rows.
+type CachedManifestRef struct {
+	Child Digest
+	Kind  RefKind
+}
+
+// CachedBlob records a blob fetched from an upstream and kept. The bytes live
+// in the cache-rooted blob store (ADR 0007), which is a different store
+// instance from the hosted one and shares no root with it.
+//
+// Unlike a hosted blob, which is recorded once globally, a cached blob is
+// recorded per proxy repository. Two proxies that both cache the same layer
+// hold one copy of the bytes and one row each: the bytes are content-addressed
+// so a second copy would be waste, and the rows are what per-proxy accounting
+// and per-proxy eviction are computed from.
+type CachedBlob struct {
+	// Repository is the full trove content name the blob was cached under.
+	Repository string
+	// Digest is what the bytes hash to.
+	Digest Digest
+	// Size is the blob length in bytes.
+	Size int64
+	// CachedAt is when the fill happened.
+	CachedAt time.Time
+	// LastAccessAt is the LRU key (Q11).
+	LastAccessAt time.Time
+}
+
 // UploadSession is an in-progress blob upload. Its existence pins the digest
 // against garbage collection (ADR 0010), which is why it is stored rather than
 // held in memory.

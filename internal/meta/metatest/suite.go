@@ -85,6 +85,7 @@ func Run(t *testing.T, f Factory) {
 		{"ContextCancellation", testContextCancellation},
 		{"CloseIsIdempotent", testCloseIsIdempotent},
 	}
+	tests = append(tests, cachedTests()...)
 	tests = append(tests, identityTests()...)
 	tests = append(tests, credentialTests()...)
 
@@ -2247,6 +2248,18 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		{"ListManifestRefs", func() error { _, err := s.ListManifestRefs(ctx, "repo", d); return err }},
 		{"ListIndexParents", func() error { _, err := s.ListIndexParents(ctx, "repo", d); return err }},
 		{"ListReferrers", func() error { _, err := s.ListReferrers(ctx, "repo", d, ""); return err }},
+		{"PutCachedManifest", func() error {
+			return s.PutCachedManifest(ctx, meta.CachedManifest{Repository: "repo", Digest: d}, nil)
+		}},
+		{"GetCachedManifest", func() error { _, err := s.GetCachedManifest(ctx, "repo", d); return err }},
+		{"ListCachedManifestRefs", func() error {
+			_, err := s.ListCachedManifestRefs(ctx, "repo", d)
+			return err
+		}},
+		{"PutCachedBlob", func() error {
+			return s.PutCachedBlob(ctx, meta.CachedBlob{Repository: "repo", Digest: d, Size: 1})
+		}},
+		{"GetCachedBlob", func() error { _, err := s.GetCachedBlob(ctx, "repo", d); return err }},
 		{"PutTag", func() error {
 			return s.PutTag(ctx, meta.Tag{Repository: "repo", Name: "t", Digest: d})
 		}},

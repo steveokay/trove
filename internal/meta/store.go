@@ -21,6 +21,7 @@ type Store interface {
 	RepositoryStore
 	ProxyCredentialStore
 	ContentStore
+	CachedContentStore
 	IdentityStore
 	CredentialStore
 	EventStore
@@ -299,11 +300,15 @@ type ContentStore interface {
 	// question -- which entities exist -- and the two are deliberately
 	// separate methods rather than one with a flag.
 	//
-	// Only hosted content is enumerated, because only hosted content has rows
-	// here: cached proxy content lives in its own table family (ADR 0009) and
-	// joins this listing when that family exists, and a group contributes the
-	// union of the members its subject may read (C-012). Neither is reachable
-	// from this method, which is what keeps it a query over one table.
+	// Only hosted content is enumerated. Cached proxy content has rows of its
+	// own since C-004 and is still not listed here: what a proxy's catalog
+	// should report -- everything it happens to have cached, which is a
+	// function of eviction and therefore changes without anybody pushing
+	// anything, or nothing at all -- is a decision that belongs with the task
+	// that serves proxy pulls, and answering it here first would settle it by
+	// accident. A group contributes the union of the members its subject may
+	// read (C-012). Neither is reachable from this method, which is what keeps
+	// it a query over one table.
 	//
 	// The visibility is applied inside the query. A name the subject cannot
 	// see must not appear in a page, in a count, or in a NextCursor -- a
@@ -369,6 +374,59 @@ type ContentStore interface {
 	// the caller checks read permission on the repository first -- this method,
 	// like GetTag, does not know the subject.
 	GetPullStats(ctx context.Context, repo, reference string) (PullStats, error)
+}
+
+// CachedContentStore manages proxy-cached manifests, their edges, and cached
+// blobs. It is the other half of the §4 separation: nothing here can reach
+// hosted content, and nothing in ContentStore can reach cached content, because
+// the two families share no method, no type, and no table (ADR 0006, ADR 0009).
+//
+// Three rules hold across it:
+//
+//   - Every write requires the content name's *entity* to exist and to be a
+//     proxy. A hosted or group entity has no upstream to refill from, so a
+//     cached row under one would be content that looks recoverable and is not
+//     -- which is precisely the confusion the separation exists to prevent.
+//     The check is ErrNotFound for a missing entity and ErrInvalid for one of
+//     the wrong type.
+//   - Writes are idempotent. A fill of content already cached is the normal
+//     case (a second pull after the row was written and before the bytes were
+//     evicted), and it refreshes the access time rather than conflicting.
+//   - Nothing here deletes. Eviction is C-013's, in internal/cache, over the
+//     cache-rooted blob store; giving the fill path a deletion method would put
+//     both halves of ADR 0009's wall inside one interface.
+type CachedContentStore interface {
+	// PutCachedManifest stores a cached manifest and its edges in one
+	// transaction, replacing the edge set wholesale as the hosted path does.
+	//
+	// The edges are not a garbage-collection graph -- cached content is
+	// reclaimed by budget, not by reachability -- but they record what one
+	// fill brought in, which is what lets eviction account for a manifest and
+	// its layers together instead of one row at a time.
+	PutCachedManifest(ctx context.Context, m CachedManifest, refs []CachedManifestRef) error
+
+	// GetCachedManifest returns one cached manifest by digest, or ErrNotFound.
+	// A miss is the cold-cache case and is not an error condition worth
+	// distinguishing: the caller fetches it from the upstream.
+	GetCachedManifest(ctx context.Context, repo string, digest Digest) (CachedManifest, error)
+
+	// ListCachedManifestRefs returns a cached manifest's edges in the order
+	// they were written, or ErrNotFound when the manifest is not cached.
+	ListCachedManifestRefs(ctx context.Context, repo string, digest Digest) ([]CachedManifestRef, error)
+
+	// PutCachedBlob records a blob cached under a proxy repository. Storing
+	// the same digest again is not an error -- blobs are content-addressed and
+	// identical by definition -- and refreshes the access time.
+	PutCachedBlob(ctx context.Context, blob CachedBlob) error
+
+	// GetCachedBlob returns one cached blob record, or ErrNotFound.
+	//
+	// It is keyed by repository as well as digest, unlike the hosted GetBlob,
+	// because "is this cached" is a per-proxy question: one proxy having
+	// fetched a layer says nothing about whether another is allowed to have
+	// it, and answering globally would let a proxy serve content its own
+	// routing rules never admitted.
+	GetCachedBlob(ctx context.Context, repo string, digest Digest) (CachedBlob, error)
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

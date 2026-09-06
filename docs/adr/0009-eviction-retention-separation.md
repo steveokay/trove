@@ -76,3 +76,31 @@ instrumented fakes).
 - The C-015/adversarial item "a cache-eviction path reaching a hosted blob (must be
   impossible)" is discharged by the proving test above rather than by exploratory
   testing.
+
+## Clarification (C-004, 2026-09-06): when each wall lands
+
+Wall 1 names four types: `meta.HostedManifest` / `meta.CachedManifest` and
+`blob.HostedRef` / `blob.CachedRef`. C-004 built the metadata half — `meta`
+now has `CachedManifest`, `CachedManifestRef` and `CachedBlob`, reached only
+through `CachedContentStore`, stored only in the `cached_*` tables of migration
+0008, and refused outright when the entity is not a proxy. The hosted types
+keep their existing names (`meta.Manifest`, `meta.Blob`): renaming them would
+touch every registry handler for no gain, since the separation is carried by
+there being two families, not by both of them being prefixed.
+
+**The blob-side digest newtypes are deferred to the first deleting caller.**
+`blob.Store` is already instantiated twice over disjoint roots (wall 2), which
+is what makes a cache path physically unable to name a hosted blob; a newtype
+adds nothing until some function's signature has to say which kind of deletion
+it performs. That function is `internal/cache`'s eviction (C-013) on one side
+and `internal/gc`'s sweep (P-007) on the other, and whichever lands first
+introduces the pair — a newtype with no deleting consumer would be a
+convention, not a wall, and the compile error it exists to produce would have
+nothing to fire on.
+
+The proving test the ADR describes therefore belongs to C-013 as well: three of
+its four assertions need an eviction pass to observe. What C-004 discharges is
+the storage half — a contract case in `metatest` writes the same digest as
+hosted content and as cached content and proves each family answers only
+through its own methods, so a statement in the wrong package has no row to
+reach even before it has no type to name.

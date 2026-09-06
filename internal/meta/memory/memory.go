@@ -58,6 +58,15 @@ type Store struct {
 	blobs   map[meta.Digest]meta.Blob
 	uploads map[string]meta.UploadSession
 
+	// Cached proxy content is a second set of maps, sharing nothing with the
+	// hosted ones above: the in-memory form of ADR 0006's separate table
+	// families and of ADR 0009's separation. Cached blobs are keyed by
+	// repository as well as digest, because whether a layer is cached is a
+	// per-proxy question.
+	cachedManifests map[string]map[meta.Digest]meta.CachedManifest
+	cachedRefs      map[string]map[meta.Digest][]meta.CachedManifestRef
+	cachedBlobs     map[string]map[meta.Digest]meta.CachedBlob
+
 	// Pull statistics are keyed by repository and reference and by nothing
 	// else: they are observations, so a row outlives the content it counted
 	// and can be written for content that never existed.
@@ -114,6 +123,11 @@ func newEmpty() *Store {
 		tags:      make(map[string]map[string]meta.Tag),
 		blobs:     make(map[meta.Digest]meta.Blob),
 		uploads:   make(map[string]meta.UploadSession),
+
+		cachedManifests: make(map[string]map[meta.Digest]meta.CachedManifest),
+		cachedRefs:      make(map[string]map[meta.Digest][]meta.CachedManifestRef),
+		cachedBlobs:     make(map[string]map[meta.Digest]meta.CachedBlob),
+
 		pullStats: make(map[pullKey]meta.PullStats),
 		events:    make(map[string]meta.Event),
 
@@ -438,6 +452,11 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 			delete(s.tags, content)
 		}
 	}
+
+	// Cached content under the entity goes too, through its own sweep over its
+	// own maps: the hosted loop above cannot reach it and must not be able to
+	// (ADR 0009).
+	s.deleteCachedContent(name)
 
 	// An upload into a repository that no longer exists can never complete,
 	// and while it survives it pins its digest against garbage collection.
