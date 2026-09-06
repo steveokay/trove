@@ -169,8 +169,9 @@ func (r *fillEvents) ofType(t event.Type) []event.Event {
 type fillCountingClient struct {
 	proxy.Client
 
-	mu sync.Mutex
-	n  int
+	mu       sync.Mutex
+	n        int
+	resolved int
 }
 
 func (c *fillCountingClient) count() {
@@ -183,6 +184,21 @@ func (c *fillCountingClient) calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.n
+}
+
+// resolutions reports how many tag resolutions reached the upstream, which is
+// how a negative-cache hit is proven: by the request that did not happen.
+func (c *fillCountingClient) resolutions() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resolved
+}
+
+func (c *fillCountingClient) ResolveTag(ctx context.Context, repo, tag string, cond proxy.Conditional) (proxy.Resolution, error) {
+	c.mu.Lock()
+	c.resolved++
+	c.mu.Unlock()
+	return c.Client.ResolveTag(ctx, repo, tag, cond)
 }
 
 func (c *fillCountingClient) FetchManifest(ctx context.Context, repo string, d blob.Digest) ([]byte, string, error) {
@@ -1269,6 +1285,20 @@ func (c *fillBrokenCache) DeleteTagLease(ctx context.Context, repo, tag string) 
 		return c.deletes
 	}
 	return c.CacheStore.DeleteTagLease(ctx, repo, tag)
+}
+
+func (c *fillBrokenCache) PutNegativeEntry(ctx context.Context, entry meta.NegativeEntry) error {
+	if c.writes != nil {
+		return c.writes
+	}
+	return c.CacheStore.PutNegativeEntry(ctx, entry)
+}
+
+func (c *fillBrokenCache) DeleteNegativeEntry(ctx context.Context, repo, reference string) error {
+	if c.deletes != nil {
+		return c.deletes
+	}
+	return c.CacheStore.DeleteNegativeEntry(ctx, repo, reference)
 }
 
 func (c *fillBrokenCache) GetCachedManifest(ctx context.Context, repo string, d meta.Digest) (meta.CachedManifest, error) {

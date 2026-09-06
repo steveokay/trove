@@ -83,6 +83,15 @@ func (u *upstream) retag(_ *testing.T, to clienttest.Content) {
 	u.byDigest[to.Digest] = to
 }
 
+// tag points an arbitrary tag at content, so a test can make a name that was
+// missing appear.
+func (u *upstream) tag(_ *testing.T, name string, to clienttest.Content) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.tags[name] = to
+	u.byDigest[to.Digest] = to
+}
+
 func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if u.faulty && u.serveFault(w, r) {
 		return

@@ -230,3 +230,42 @@ that is the right behaviour rather than serving one upstream hiccup to everybody
 who asks for the next minute. What replaces the count there is a deterministic
 wiring test with a recording `Coalescer`, which pins both keys and proves the
 blob path is not among them. Coverage 96.2% overall, `coalesce.go` at 100%.
+
+## C-007 — Negative cache for upstream not-founds
+
+A tag nobody ever pushed is pulled as often as one that exists — a typo in a
+manifest, a deployment naming a release that was never cut, a retry loop — and
+on a rate-limited remote those are the requests that cost the most, because
+they buy nothing and count the same as a real pull. **Migration 0010** adds
+`negative_cache`, keyed by repository and reference and swept with the rest of
+the cached family; `internal/proxy/negative.go` is the resolver's half.
+
+Two rules bound it, and both are enforced where they can be seen. **Names
+only**: a digest that is absent now may exist a moment later, and caching that
+absence would break a push followed by a pull through a group (ADR 0008), so
+`Manifest` and `Blob` never read this table and never write to it — asserted by
+a case that misses a digest three times, finds no row, then plants one by hand
+and shows the digest path ignores it. And **briefly**: 60 seconds by default,
+enough to absorb a retry loop and not enough to remember a decision.
+
+**A zero `NegativeTTL` switches the mechanism off**, which is the opposite of
+what zero means for `TagTTL` and deliberately so: a lease with no TTL means
+"confirm every time", the safe reading of a mapping that may have moved, while
+an absence with no TTL would mean "believe it forever", which is the unsafe
+one. Freshness reads the repository's *current* TTL, as leases do, so switching
+it off takes effect on the next pull rather than after every row happens to be
+rewritten.
+
+The entry is **cleared when the upstream finally answers** rather than left to
+expire, which is what gives `DeleteNegativeEntry` a caller and keeps the table
+tracking live mistakes instead of accumulating every one anybody ever made.
+A remembered absence is returned as the upstream's own `ErrNotFound`, wrapped
+with a note for the log: a caller must not be able to tell a remembered
+not-found from a fresh one, or group resolution would treat the two differently
+and a member's behaviour would depend on how recently somebody mistyped a tag.
+
+Store failures follow the pattern the rest of the subsystem uses: a record that
+cannot be written or cleared costs one upstream request and is logged, while a
+record that cannot be *read* fails the resolution — working around a broken
+metadata store by asking the upstream harder is exactly how a cache becomes a
+stampede. Coverage 96.2% overall, `negative.go` at 100%.

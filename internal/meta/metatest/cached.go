@@ -32,6 +32,10 @@ func cachedTests() []suiteCase {
 		{"TagLeaseValidation", testTagLeaseValidation},
 		{"TagLeaseDelete", testTagLeaseDelete},
 		{"TagLeasesDieWithTheRepository", testTagLeasesDieWithTheRepository},
+		{"NegativeEntryRoundTrip", testNegativeEntryRoundTrip},
+		{"NegativeEntryRefreshAndDelete", testNegativeEntryRefreshAndDelete},
+		{"NegativeEntryRequiresAProxyEntity", testNegativeEntryRequiresAProxyEntity},
+		{"NegativeEntriesDieWithTheRepository", testNegativeEntriesDieWithTheRepository},
 	}
 }
 
@@ -537,5 +541,122 @@ func testTagLeasesDieWithTheRepository(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetTagLease(ctx(), "dockerhub2/library/nginx", "latest"); err != nil {
 		t.Errorf("GetTagLease for the neighbour: %v, want it untouched", err)
+	}
+}
+
+// --- negative cache (C-007) ------------------------------------------------
+
+// A recorded absence: what an upstream did not have, so a typo does not hammer
+// it. Names only -- the rule that a digest is never recorded lives with the
+// resolver, because this store cannot tell one from the other.
+
+func negativeEntry(repo, reference string) meta.NegativeEntry {
+	return meta.NegativeEntry{
+		Repository: repo,
+		Reference:  reference,
+		ObservedAt: testTime,
+		TTL:        60 * time.Second,
+	}
+}
+
+func testNegativeEntryRoundTrip(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+
+	if err := s.PutNegativeEntry(ctx(), negativeEntry(repo, "no-such-tag")); err != nil {
+		t.Fatalf("PutNegativeEntry: %v", err)
+	}
+	got, err := s.GetNegativeEntry(ctx(), repo, "no-such-tag")
+	if err != nil {
+		t.Fatalf("GetNegativeEntry: %v", err)
+	}
+	switch {
+	case got.Reference != "no-such-tag":
+		t.Errorf("reference = %q, want %q", got.Reference, "no-such-tag")
+	case !got.ObservedAt.Equal(testTime):
+		t.Errorf("observed at %s, want %s", got.ObservedAt, testTime)
+	case got.TTL != 60*time.Second:
+		t.Errorf("ttl = %s, want 60s", got.TTL)
+	}
+
+	// Per repository and per reference, like everything else in this family.
+	mustCreateRepo(t, s, "quay", meta.Proxy)
+	if _, err := s.GetNegativeEntry(ctx(), "quay/library/nginx", "no-such-tag"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetNegativeEntry under another proxy = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetNegativeEntry(ctx(), repo, "another-tag"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetNegativeEntry for an unrecorded name = %v, want ErrNotFound", err)
+	}
+
+	entry := negativeEntry(repo, "")
+	requireErrIs(t, s.PutNegativeEntry(ctx(), entry), meta.ErrInvalid, "PutNegativeEntry without a reference")
+}
+
+func testNegativeEntryRefreshAndDelete(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+
+	if err := s.PutNegativeEntry(ctx(), negativeEntry(repo, "typo")); err != nil {
+		t.Fatalf("PutNegativeEntry: %v", err)
+	}
+
+	// Missing the same name again is a refresh, not a conflict: the entry says
+	// when the upstream last said no.
+	refreshed := negativeEntry(repo, "typo")
+	refreshed.ObservedAt = updateTime
+	refreshed.TTL = 30 * time.Second
+	if err := s.PutNegativeEntry(ctx(), refreshed); err != nil {
+		t.Fatalf("PutNegativeEntry again: %v", err)
+	}
+	got, err := s.GetNegativeEntry(ctx(), repo, "typo")
+	if err != nil {
+		t.Fatalf("GetNegativeEntry: %v", err)
+	}
+	if !got.ObservedAt.Equal(updateTime) || got.TTL != 30*time.Second {
+		t.Errorf("entry = %+v, want the refreshed observation", got)
+	}
+
+	if err := s.DeleteNegativeEntry(ctx(), repo, "typo"); err != nil {
+		t.Fatalf("DeleteNegativeEntry: %v", err)
+	}
+	requireErrIs(t, s.DeleteNegativeEntry(ctx(), repo, "typo"), meta.ErrNotFound, "DeleteNegativeEntry twice")
+}
+
+func testNegativeEntryRequiresAProxyEntity(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "shop", meta.Hosted)
+	mustCreateRepo(t, s, "everything", meta.Group)
+
+	for _, name := range []string{"shop", "shop/api", "everything", "everything/api"} {
+		err := s.PutNegativeEntry(ctx(), negativeEntry(name, "no-such-tag"))
+		requireErrIs(t, err, meta.ErrInvalid, "PutNegativeEntry under "+name)
+	}
+
+	err := s.PutNegativeEntry(ctx(), negativeEntry("nothing-here/x", "no-such-tag"))
+	requireErrIs(t, err, meta.ErrNotFound, "PutNegativeEntry under an absent entity")
+}
+
+func testNegativeEntriesDieWithTheRepository(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	mustCreateRepo(t, s, "dockerhub2", meta.Proxy)
+
+	if err := s.PutNegativeEntry(ctx(), negativeEntry("dockerhub/library/nginx", "typo")); err != nil {
+		t.Fatalf("PutNegativeEntry: %v", err)
+	}
+	if err := s.PutNegativeEntry(ctx(), negativeEntry("dockerhub2/library/nginx", "typo")); err != nil {
+		t.Fatalf("PutNegativeEntry: %v", err)
+	}
+
+	if err := s.DeleteRepository(ctx(), "dockerhub"); err != nil {
+		t.Fatalf("DeleteRepository: %v", err)
+	}
+
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	if _, err := s.GetNegativeEntry(ctx(), "dockerhub/library/nginx", "typo"); !errors.Is(err, meta.ErrNotFound) {
+		// A proxy recreated at this name points somewhere else entirely; an
+		// inherited absence would refuse a pull the new upstream would serve.
+		t.Errorf("GetNegativeEntry after recreation = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetNegativeEntry(ctx(), "dockerhub2/library/nginx", "typo"); err != nil {
+		t.Errorf("GetNegativeEntry for the neighbour: %v, want it untouched", err)
 	}
 }

@@ -292,3 +292,71 @@ func (s *Store) GetCachedBlob(ctx context.Context, repo string, digest meta.Dige
 	b.LastAccessAt = sqlutil.AsTime(lastAccess)
 	return b, nil
 }
+
+const negativeEntryColumns = `repo_name, reference, observed_at, ttl_s`
+
+// PutNegativeEntry records that an upstream did not have a name.
+func (s *Store) PutNegativeEntry(ctx context.Context, entry meta.NegativeEntry) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if entry.Reference == "" {
+		return meta.Invalid("reference", "must not be empty")
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		if err := s.requireProxyEntity(ctx, tx, entry.Repository); err != nil {
+			return err
+		}
+		_, err := sqlutil.Execute(ctx, tx,
+			`INSERT INTO negative_cache (`+negativeEntryColumns+`) VALUES (?, ?, ?, ?)
+			 ON CONFLICT (repo_name, reference) DO UPDATE SET
+			     observed_at = excluded.observed_at,
+			     ttl_s = excluded.ttl_s`,
+			entry.Repository, entry.Reference,
+			sqlutil.Millis(entry.ObservedAt), int64(entry.TTL/time.Second))
+		return err
+	})
+}
+
+// GetNegativeEntry returns a recorded absence.
+func (s *Store) GetNegativeEntry(ctx context.Context, repo, reference string) (meta.NegativeEntry, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.NegativeEntry{}, err
+	}
+
+	var (
+		entry    meta.NegativeEntry
+		observed sql.NullInt64
+		ttl      int64
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+negativeEntryColumns+` FROM negative_cache WHERE repo_name = ? AND reference = ?`,
+		repo, reference).Scan(&entry.Repository, &entry.Reference, &observed, &ttl)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return meta.NegativeEntry{}, meta.NotFound("negative cache entry", reference)
+	case err != nil:
+		return meta.NegativeEntry{}, fmt.Errorf("scan negative cache entry: %w", err)
+	}
+	entry.ObservedAt = sqlutil.AsTime(observed)
+	entry.TTL = time.Duration(ttl) * time.Second
+	return entry, nil
+}
+
+// DeleteNegativeEntry removes a recorded absence.
+func (s *Store) DeleteNegativeEntry(ctx context.Context, repo, reference string) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+
+	affected, err := sqlutil.Execute(ctx, s.db,
+		`DELETE FROM negative_cache WHERE repo_name = ? AND reference = ?`, repo, reference)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return meta.NotFound("negative cache entry", reference)
+	}
+	return nil
+}

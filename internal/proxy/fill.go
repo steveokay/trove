@@ -37,6 +37,12 @@ type CacheStore interface {
 	GetTagLease(ctx context.Context, repo, tag string) (meta.TagLease, error)
 	PutTagLease(ctx context.Context, lease meta.TagLease) error
 	DeleteTagLease(ctx context.Context, repo, tag string) error
+
+	// The negative half (C-007): what the upstream did not have, remembered
+	// briefly so a typo does not hammer it.
+	GetNegativeEntry(ctx context.Context, repo, reference string) (meta.NegativeEntry, error)
+	PutNegativeEntry(ctx context.Context, entry meta.NegativeEntry) error
+	DeleteNegativeEntry(ctx context.Context, repo, reference string) error
 }
 
 // CacheBlobStore is the cache-rooted blob store (ADR 0007): a store that can
@@ -92,6 +98,17 @@ type Target struct {
 	// minutes is applied by whoever builds the Target from configuration, and
 	// a zero-value Target is deliberately the conservative one.
 	TagTTL time.Duration
+
+	// NegativeTTL is how long an upstream's not-found is remembered for a name
+	// (ADR 0008, C-007). The default is 60 seconds and is applied by whoever
+	// builds the Target, as TagTTL is.
+	//
+	// **Zero switches negative caching off**, which is the opposite of what
+	// zero means for TagTTL and deliberately so: a lease with no TTL means
+	// "confirm every time", the safe reading of a mapping that may have moved,
+	// while an absence with no TTL would mean "believe it forever", which is
+	// the unsafe one.
+	NegativeTTL time.Duration
 
 	// Offline is what to do when the upstream cannot be reached and the lease
 	// has expired. The zero value is serve-stale, which is the configured

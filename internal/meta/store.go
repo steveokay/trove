@@ -451,6 +451,28 @@ type CachedContentStore interface {
 	// keeping it "just in case" is how a proxy outlives the registry it
 	// mirrors.
 	DeleteTagLease(ctx context.Context, repo, tag string) error
+
+	// PutNegativeEntry records that an upstream did not have a name, so a typo
+	// does not hammer it (ADR 0008). Re-recording is a refresh rather than a
+	// conflict.
+	//
+	// The reference must be non-empty (ErrInvalid). Nothing stops a caller
+	// passing a digest as one, and nothing here would know: that rule --
+	// negative entries are about names only -- lives with the resolver, which
+	// is the code that knows what it was asked for.
+	PutNegativeEntry(ctx context.Context, entry NegativeEntry) error
+
+	// GetNegativeEntry returns a recorded absence, or ErrNotFound when there is
+	// none. Expiry is the caller's judgement for the reason it is on the lease:
+	// the TTL is configuration, and configuration changes between the write and
+	// the read.
+	GetNegativeEntry(ctx context.Context, repo, reference string) (NegativeEntry, error)
+
+	// DeleteNegativeEntry removes a recorded absence, returning ErrNotFound
+	// when there was none. It is what a resolver calls when the upstream
+	// finally answers: the row has served its purpose, and leaving it would
+	// grow a table out of every typo anybody ever made.
+	DeleteNegativeEntry(ctx context.Context, repo, reference string) error
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

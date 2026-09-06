@@ -111,6 +111,19 @@ func (f *Filler) resolveTag(ctx context.Context, t Target, tag string) (TagResol
 		return TagResolution{Digest: blob.Digest(lease.Digest), Hit: true}, nil
 	}
 
+	// A name the upstream did not have, asked for again inside the negative
+	// TTL, is answered from the record (C-007). The check sits after the lease
+	// and before the upstream: a live lease is a stronger statement than a
+	// remembered absence, and the two cannot both be current anyway, because a
+	// not-found deletes the lease that named it.
+	absent, recorded, err := f.negative(ctx, t, tag)
+	if err != nil {
+		return TagResolution{}, err
+	}
+	if recorded && f.negativeFresh(absent, t.NegativeTTL, now) {
+		return TagResolution{}, negativeAnswer(t, tag)
+	}
+
 	conditional := Conditional{}
 	if held {
 		conditional = Conditional{Digest: blob.Digest(lease.Digest), ETag: lease.ETag}
@@ -119,6 +132,12 @@ func (f *Filler) resolveTag(ctx context.Context, t Target, tag string) (TagResol
 	resolution, err := t.Client.ResolveTag(ctx, t.Upstream, tag, conditional)
 	if err != nil {
 		return f.resolveFailed(ctx, t, tag, lease, held, err, now)
+	}
+	if recorded {
+		// The upstream has it after all, so the record has done its job. It is
+		// dropped here rather than left to expire: a table that keeps every
+		// name anybody ever mistyped grows without anything ever pruning it.
+		f.dropNegative(ctx, t, tag)
 	}
 
 	if !resolution.Changed && held {
@@ -211,6 +230,10 @@ func (f *Filler) resolveFailed(ctx context.Context, t Target, tag string,
 		if held {
 			f.dropLease(ctx, t, tag)
 		}
+		// And the absence is remembered, briefly, so the retry loop behind this
+		// pull costs the upstream one request rather than one per attempt
+		// (C-007).
+		f.recordNegative(ctx, t, tag, now)
 		return TagResolution{}, err
 	}
 

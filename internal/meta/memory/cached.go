@@ -227,6 +227,70 @@ func (s *Store) DeleteTagLease(ctx context.Context, repo, tag string) error {
 	return nil
 }
 
+// PutNegativeEntry records that an upstream did not have a name.
+func (s *Store) PutNegativeEntry(ctx context.Context, entry meta.NegativeEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if err := s.requireProxyEntity(entry.Repository); err != nil {
+		return err
+	}
+	if entry.Reference == "" {
+		return meta.Invalid("reference", "must not be empty")
+	}
+
+	if s.negativeCache[entry.Repository] == nil {
+		s.negativeCache[entry.Repository] = make(map[string]meta.NegativeEntry)
+	}
+	s.negativeCache[entry.Repository][entry.Reference] = entry
+	return nil
+}
+
+// GetNegativeEntry returns a recorded absence.
+func (s *Store) GetNegativeEntry(ctx context.Context, repo, reference string) (meta.NegativeEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.NegativeEntry{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.NegativeEntry{}, err
+	}
+
+	entry, ok := s.negativeCache[repo][reference]
+	if !ok {
+		return meta.NegativeEntry{}, meta.NotFound("negative cache entry", reference)
+	}
+	return entry, nil
+}
+
+// DeleteNegativeEntry removes a recorded absence.
+func (s *Store) DeleteNegativeEntry(ctx context.Context, repo, reference string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if _, ok := s.negativeCache[repo][reference]; !ok {
+		return meta.NotFound("negative cache entry", reference)
+	}
+	delete(s.negativeCache[repo], reference)
+	return nil
+}
+
 // deleteCachedContent drops every cached row stored under an entity. It is
 // called from DeleteRepository, with the lock held.
 //
@@ -249,6 +313,11 @@ func (s *Store) deleteCachedContent(entity string) {
 	for content := range s.tagLeases {
 		if belongsTo(content, entity) {
 			delete(s.tagLeases, content)
+		}
+	}
+	for content := range s.negativeCache {
+		if belongsTo(content, entity) {
+			delete(s.negativeCache, content)
 		}
 	}
 }

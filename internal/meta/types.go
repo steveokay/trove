@@ -312,6 +312,30 @@ type TagLease struct {
 	Stale bool
 }
 
+// NegativeEntry records that an upstream did not have something, so a typo does
+// not hammer it (ADR 0008, C-007).
+//
+// It is deliberately about *names* only. A digest that is absent upstream now
+// may exist a moment later -- somebody is pushing it -- and caching that
+// absence would break push-then-pull-through-a-group, so nothing keyed by
+// digest is ever recorded here.
+type NegativeEntry struct {
+	// Repository is the full trove content name.
+	Repository string
+
+	// Reference is the tag, or the name itself when the whole repository is
+	// absent upstream.
+	Reference string
+
+	// ObservedAt is when the upstream said no, on the caller's clock.
+	ObservedAt time.Time
+
+	// TTL is how long that answer may be reused. It is short by design
+	// (60 seconds by default, Q11): the entry exists to absorb a retry loop,
+	// not to remember a decision.
+	TTL time.Duration
+}
+
 // UploadSession is an in-progress blob upload. Its existence pins the digest
 // against garbage collection (ADR 0010), which is why it is stored rather than
 // held in memory.

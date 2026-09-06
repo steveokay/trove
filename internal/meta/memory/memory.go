@@ -72,6 +72,10 @@ type Store struct {
 	// tag, and they hold no reference to the cached manifest they name.
 	tagLeases map[string]map[string]meta.TagLease
 
+	// Recorded absences: what an upstream did not have, so a typo does not
+	// hammer it (ADR 0008). Names only -- never a digest.
+	negativeCache map[string]map[string]meta.NegativeEntry
+
 	// Pull statistics are keyed by repository and reference and by nothing
 	// else: they are observations, so a row outlives the content it counted
 	// and can be written for content that never existed.
@@ -133,6 +137,7 @@ func newEmpty() *Store {
 		cachedRefs:      make(map[string]map[meta.Digest][]meta.CachedManifestRef),
 		cachedBlobs:     make(map[string]map[meta.Digest]meta.CachedBlob),
 		tagLeases:       make(map[string]map[string]meta.TagLease),
+		negativeCache:   make(map[string]map[string]meta.NegativeEntry),
 
 		pullStats: make(map[pullKey]meta.PullStats),
 		events:    make(map[string]meta.Event),

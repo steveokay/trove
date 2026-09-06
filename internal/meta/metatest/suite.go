@@ -2265,6 +2265,11 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 		}},
 		{"GetTagLease", func() error { _, err := s.GetTagLease(ctx, "repo", "t"); return err }},
 		{"DeleteTagLease", func() error { return s.DeleteTagLease(ctx, "repo", "t") }},
+		{"PutNegativeEntry", func() error {
+			return s.PutNegativeEntry(ctx, meta.NegativeEntry{Repository: "repo", Reference: "t"})
+		}},
+		{"GetNegativeEntry", func() error { _, err := s.GetNegativeEntry(ctx, "repo", "t"); return err }},
+		{"DeleteNegativeEntry", func() error { return s.DeleteNegativeEntry(ctx, "repo", "t") }},
 		{"PutTag", func() error {
 			return s.PutTag(ctx, meta.Tag{Repository: "repo", Name: "t", Digest: d})
 		}},
