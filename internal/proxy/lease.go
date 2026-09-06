@@ -129,7 +129,15 @@ func (f *Filler) resolveTag(ctx context.Context, t Target, tag string) (TagResol
 		conditional = Conditional{Digest: blob.Digest(lease.Digest), ETag: lease.ETag}
 	}
 
+	// A throttled upstream is answered from the backoff without being called,
+	// and the answer travels the degraded path: cached content is served
+	// stale, uncached content fails, `strict` fails both (C-008, C-009).
+	if err := f.upstreamReady(t, now); err != nil {
+		return f.resolveFailed(ctx, t, tag, lease, held, err, now)
+	}
+
 	resolution, err := t.Client.ResolveTag(ctx, t.Upstream, tag, conditional)
+	f.recordUpstream(ctx, t, now, err)
 	if err != nil {
 		return f.resolveFailed(ctx, t, tag, lease, held, err, now)
 	}

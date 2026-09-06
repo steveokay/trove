@@ -208,6 +208,7 @@ type Filler struct {
 	meta      CacheStore
 	events    Publisher
 	coalescer Coalescer
+	backoff   *Backoff
 	now       func() time.Time
 	log       *slog.Logger
 }
@@ -229,6 +230,12 @@ type FillerOptions struct {
 	// exists so a deployment that later coordinates across processes can
 	// supply one without this package changing.
 	Coalescer Coalescer
+
+	// Backoff decides when a throttled upstream may be called again (C-009).
+	// Nil means a fresh one with the package defaults. It is shared across
+	// every target a filler serves, because the state it holds is per
+	// upstream and the fillers are not.
+	Backoff *Backoff
 
 	// Now is the clock. Nil means time.Now. Cached-at and last-accessed
 	// timestamps read it and nothing in this package reads the wall clock
@@ -255,11 +262,15 @@ func NewFiller(opts FillerOptions) (*Filler, error) {
 		meta:      opts.Meta,
 		events:    opts.Events,
 		coalescer: opts.Coalescer,
+		backoff:   opts.Backoff,
 		now:       opts.Now,
 		log:       opts.Log,
 	}
 	if f.coalescer == nil {
 		f.coalescer = NewSingleFlight()
+	}
+	if f.backoff == nil {
+		f.backoff = NewBackoff(BackoffOptions{})
 	}
 	if f.now == nil {
 		f.now = time.Now
@@ -324,7 +335,16 @@ func (f *Filler) manifest(ctx context.Context, t Target, digest blob.Digest) (Ma
 		return ManifestResult{}, fmt.Errorf("read the cached manifest: %w", err)
 	}
 
+	// A throttled upstream is not called at all (C-009): the request itself is
+	// the harm, so the answer comes from the backoff rather than from the
+	// remote.
+	now := f.now()
+	if err := f.upstreamReady(t, now); err != nil {
+		return ManifestResult{}, err
+	}
+
 	payload, mediaType, err := t.Client.FetchManifest(ctx, t.Upstream, digest)
+	f.recordUpstream(ctx, t, now, err)
 	if err != nil {
 		if errors.Is(err, ErrDigestMismatch) {
 			f.publishCorrupt(ctx, t, digest)
@@ -421,7 +441,13 @@ func (f *Filler) Blob(ctx context.Context, t Target, digest blob.Digest) (BlobRe
 		return BlobResult{}, fmt.Errorf("read the cached blob: %w", err)
 	}
 
+	now := f.now()
+	if err := f.upstreamReady(t, now); err != nil {
+		return BlobResult{}, err
+	}
+
 	upstream, size, err := t.Client.FetchBlob(ctx, t.Upstream, digest)
+	f.recordUpstream(ctx, t, now, err)
 	if err != nil {
 		if errors.Is(err, ErrDigestMismatch) {
 			f.publishCorrupt(ctx, t, digest)

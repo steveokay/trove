@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 // The failure classification is exercised end to end through real client errors
@@ -35,5 +36,27 @@ func TestIsTimeoutRequiresEvidence(t *testing.T) {
 				t.Errorf("isTimeout(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// fullJitter is the default spread. It is exercised through the schedule
+// elsewhere; this pins the two properties the schedule depends on -- that the
+// draw stays inside the window it was given, and that a window of nothing
+// cannot become a delay of something (nor panic, which is what the underlying
+// random source does when asked for a value below one).
+func TestFullJitterStaysInsideItsWindow(t *testing.T) {
+	t.Parallel()
+
+	for _, window := range []time.Duration{0, -time.Second} {
+		if got := fullJitter(window); got != 0 {
+			t.Errorf("fullJitter(%s) = %s, want 0", window, got)
+		}
+	}
+
+	for range 64 {
+		got := fullJitter(time.Second)
+		if got < 0 || got >= time.Second {
+			t.Fatalf("fullJitter(1s) = %s, want it drawn from [0s, 1s)", got)
+		}
 	}
 }

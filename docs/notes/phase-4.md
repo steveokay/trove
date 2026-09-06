@@ -316,3 +316,62 @@ Two deliberate absences. The `Warning: 110 - "response is stale"` header ADR
 `StaleFor` on the resolution are what that task will render it from. And the
 backoff that a `rate-limited` cause should feed is C-009's — this task
 classifies, it does not sleep. Coverage 96.3% overall, `degraded.go` at 100%.
+
+## C-009 — Rate-limit handling and upstream backoff
+
+Avoiding Docker Hub throttling is a primary reason operators deploy a
+pull-through cache (§4), so being throttled *by* Docker Hub is the one failure
+this subsystem must not make worse: a 429 retried immediately, by every pull,
+from every node in a cluster, turns a rate limit into an outage that outlasts
+the window that caused it. `internal/proxy/backoff.go` is the schedule.
+
+**State is keyed by the proxy entity**, not by the content name. One entity has
+one upstream and one credential (ADR 0005), so a 429 for
+`dockerhub/library/nginx` is a 429 for everything under `dockerhub`; keying by
+content name would let a hundred repository paths each discover the same
+throttling separately, which is exactly the storm the backoff exists to
+prevent.
+
+The delay is **the longest of what the upstream asked for and a jittered
+exponential**, then capped. Honouring `Retry-After` is the point — the upstream
+is the only party that knows when its window rolls over, and C-002 already
+parses both the seconds and the HTTP-date forms — while the exponential covers a
+429 that named nothing. The cap (5 minutes by default) applies to the
+upstream's number too: a proxy that goes quiet for the six hours Docker Hub
+sometimes asks for is indistinguishable from a broken one, and one probe per
+cap interval costs the upstream nothing while letting the proxy recover on its
+own. Jitter is full jitter by default, injectable because a schedule with
+randomness in it is otherwise untestable — the curve is asserted with the
+jitter injected away, and the default is asserted by its bounds.
+
+**While backing off, the proxy behaves exactly as it does when the upstream is
+unreachable.** That is not new code: the synthesized error is the same
+`*RateLimitedError` a real 429 produces, so C-008 classifies it as
+`rate-limited` and C-005's degraded path serves the cached tag stale, fails
+uncached content, and fails everything under `strict`. Digest fetches are
+bounded by the same window — the request itself is the harm, so nothing goes out
+regardless of what is being asked for. The acceptance criterion is a test:
+fifty pulls during one window cost the upstream one request, and one more after
+it expires.
+
+**Only throttling backs off.** An unreachable upstream is retried on the next
+pull, because a dial that fails costs nobody anything and a proxy that stopped
+trying would keep failing for a window after the network came back — the
+opposite of what degraded mode is for. A success clears the standing completely,
+so one 429 in a quiet hour does not leave the next one starting halfway up the
+curve. Adversarial cases pin the arithmetic: forty consecutive refusals land on
+the cap rather than wrapping the exponential into an instant retry, and neither
+a hostile jitter nor a negative `Retry-After` can pull the deadline into the
+past, which would read as "ready" and silently disable the backoff.
+
+**The metrics half is deliberately deferred to E-005/E-006**, and this is a
+scope decision rather than an omission. E-005 owns the registry, the collectors
+and the `/metrics` exposure modes; E-006 owns the rule that a repository name
+may only appear as a label behind `metrics.per_repo: true` (default false),
+with a label-lint test. Per-proxy gauges written here would have to pre-empt all
+three, and would ship a repository-labelled series that E-006's default forbids.
+What C-009 provides instead is the data in a shape a collector can read without
+touching proxy internals: `Backoff.Snapshot` for the backoff state, and
+`Client.RateLimit()` — which C-002 already populates from
+`RateLimit-Limit`/`RateLimit-Remaining` — for the headroom itself. Coverage
+96.3% overall, `backoff.go` at 100%.
