@@ -127,3 +127,61 @@ still lists hosted content only — what a proxy's catalog should report is a
 decision that belongs with the task that serves proxy pulls, and answering it
 here would have settled it by accident. Coverage 96.1% overall, `fill.go` at
 100%.
+
+## C-005 — Tag → digest lease with TTL and revalidation
+
+The distinction the whole subsystem turns on, made concrete: content fetched by
+digest is cached forever (C-004), and the mapping from a *name* to a digest is
+a lease held for a TTL. `tag_leases` is **migration 0009** in both engines,
+keyed by repository and tag, swept with the rest of the cached family when its
+entity goes.
+
+Three columns needed a decision. `fetched_at` is when the mapping was last
+*confirmed* rather than first learned, so an unchanged revalidation moves it
+while leaving the digest alone. `ttl_s` records the interval that was in effect
+when the row was written and is **not** what expiry is computed from — the
+resolver reads the repository's current TTL, because an operator who lowers it
+expects the next pull to revalidate, not the pull after every lease happens to
+be rewritten. And `stale` is deliberately not "past its TTL", which is
+derivable from `fetched_at` and would drift the moment it were stored: it marks
+a lease whose last revalidation could not be completed and which was served
+anyway, which is a real event nothing else remembers and the flag an operator
+reads when asking why a cluster is pulling yesterday's image. ADR 0006 named
+the column without saying which of the two it meant; this is the reading that
+carries information.
+
+`Filler.ResolveTag` has three outcomes. A lease inside its TTL answers with no
+upstream request at all. An expired one is revalidated **conditionally** —
+the upstream is told the digest and entity tag we hold, and an unchanged tag
+transfers no manifest body, which C-002's contract suite already proves against
+both registry:2 and the fake. Unchanged moves the deadline and nothing else;
+changed caches the new manifest *from the bytes the resolution already carried*
+(re-fetching by digest would pay for them twice) and repoints the lease, while
+**the old manifest stays cached** — an image pinned by digest keeps working,
+which is why nothing is deleted here. A tag the upstream no longer has drops
+its lease and answers not-found, and the manifest it named stays cached for the
+same reason.
+
+**Degraded mode covers outages and nothing else.** Unreachability and 429 serve
+the expired lease with `cache.stale-served` and a `Stale` flag; `strict` fails
+instead. A rejected credential and a refused redirect do *not*: they are a
+configuration problem and a security event, and serving stale content through
+either would replace a loud failure with a quiet one. The stale path marks the
+lease but does **not** move `fetched_at` — refreshing the deadline there would
+let one unreachable upstream buy a full TTL of silence before anything tried
+again. C-008 refines "unreachable" into dial, DNS, and timeout and wires the
+mode through configuration; the decision about which failures qualify does not
+change with it.
+
+`TagTTL` and `Offline` live on the per-call `Target` rather than on the Filler,
+because they are per-repository configuration and one process serves many
+proxies. A zero TTL means revalidate on every pull (Q11), so it is *not* a
+missing value the package fills in with the 15-minute default: whoever builds
+the Target from configuration applies that, and a zero-value Target is
+deliberately the conservative one.
+
+Not in scope, and each absent on purpose: single-flight (C-006 — N concurrent
+cold pulls still make N resolutions), negative caching (C-007 — a typo'd tag
+reaches the upstream every time), and the serving-path wiring, which lands with
+the task that mounts proxy pulls on `/v2/`. Coverage 96.2% overall, `lease.go`
+at 100%.

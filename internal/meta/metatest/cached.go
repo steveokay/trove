@@ -26,6 +26,12 @@ func cachedTests() []suiteCase {
 		{"CachedBlobsAreScopedToTheirRepository", testCachedBlobsAreScopedToTheirRepository},
 		{"CachedAndHostedContentAreInvisibleToEachOther", testCachedAndHostedContentAreInvisibleToEachOther},
 		{"CachedContentDiesWithTheRepository", testCachedContentDiesWithTheRepository},
+		{"TagLeaseRoundTrip", testTagLeaseRoundTrip},
+		{"TagLeaseRevalidationReplaces", testTagLeaseRevalidationReplaces},
+		{"TagLeaseRequiresAProxyEntity", testTagLeaseRequiresAProxyEntity},
+		{"TagLeaseValidation", testTagLeaseValidation},
+		{"TagLeaseDelete", testTagLeaseDelete},
+		{"TagLeasesDieWithTheRepository", testTagLeasesDieWithTheRepository},
 	}
 }
 
@@ -348,5 +354,188 @@ func testCachedContentDiesWithTheRepository(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetCachedBlob(ctx(), "dockerhub2/library/nginx", digest("layer")); err != nil {
 		t.Errorf("GetCachedBlob for the neighbour: %v, want it untouched", err)
+	}
+}
+
+// --- tag leases (C-005) ----------------------------------------------------
+
+// A lease is somebody else's fact, borrowed for a while: the mapping from a tag
+// to a digest, with when it was last confirmed and whether the last attempt to
+// confirm it failed. It is deliberately not a hosted Tag, and the store keeps
+// them in different tables reached by different methods.
+
+func tagLease(repo, tag string, d meta.Digest) meta.TagLease {
+	return meta.TagLease{
+		Repository: repo,
+		Tag:        tag,
+		Digest:     d,
+		ETag:       `W/"abc123"`,
+		FetchedAt:  testTime,
+		TTL:        15 * time.Minute,
+	}
+}
+
+func testTagLeaseRoundTrip(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+	want := tagLease(repo, "latest", digest("leased"))
+
+	if err := s.PutTagLease(ctx(), want); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+	got, err := s.GetTagLease(ctx(), repo, "latest")
+	if err != nil {
+		t.Fatalf("GetTagLease: %v", err)
+	}
+	switch {
+	case got.Digest != want.Digest:
+		t.Errorf("digest = %q, want %q", got.Digest, want.Digest)
+	case got.ETag != want.ETag:
+		// The entity tag goes back upstream as If-None-Match, so a store that
+		// dropped it would make every revalidation transfer a manifest body.
+		t.Errorf("etag = %q, want %q", got.ETag, want.ETag)
+	case !got.FetchedAt.Equal(testTime):
+		t.Errorf("fetched at %s, want %s", got.FetchedAt, testTime)
+	case got.TTL != want.TTL:
+		t.Errorf("ttl = %s, want %s", got.TTL, want.TTL)
+	case got.Stale:
+		t.Error("a freshly written lease came back stale")
+	}
+
+	// Leases are per repository and per tag, like every other cached row.
+	mustCreateRepo(t, s, "quay", meta.Proxy)
+	if _, err := s.GetTagLease(ctx(), "quay/library/nginx", "latest"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetTagLease under another proxy = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetTagLease(ctx(), repo, "never-resolved"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("GetTagLease for an unresolved tag = %v, want ErrNotFound", err)
+	}
+
+	// A zero TTL is a real setting -- revalidate on every pull (Q11) -- and
+	// must survive the round trip as itself rather than as "unset".
+	always := tagLease(repo, "always", digest("always"))
+	always.TTL = 0
+	if err := s.PutTagLease(ctx(), always); err != nil {
+		t.Fatalf("PutTagLease with a zero TTL: %v", err)
+	}
+	stored, err := s.GetTagLease(ctx(), repo, "always")
+	if err != nil {
+		t.Fatalf("GetTagLease: %v", err)
+	}
+	if stored.TTL != 0 {
+		t.Errorf("ttl = %s, want 0", stored.TTL)
+	}
+}
+
+// Every revalidation writes a lease, whether the tag moved or not, so
+// replacement is the normal case rather than a conflict.
+func testTagLeaseRevalidationReplaces(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+
+	if err := s.PutTagLease(ctx(), tagLease(repo, "latest", digest("first"))); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+
+	moved := tagLease(repo, "latest", digest("second"))
+	moved.ETag = `W/"def456"`
+	moved.FetchedAt = updateTime
+	moved.Stale = true
+	if err := s.PutTagLease(ctx(), moved); err != nil {
+		t.Fatalf("PutTagLease again: %v", err)
+	}
+
+	got, err := s.GetTagLease(ctx(), repo, "latest")
+	if err != nil {
+		t.Fatalf("GetTagLease: %v", err)
+	}
+	switch {
+	case got.Digest != digest("second"):
+		t.Errorf("digest = %q, want the tag's new target", got.Digest)
+	case got.ETag != `W/"def456"`:
+		t.Errorf("etag = %q, want the new one", got.ETag)
+	case !got.FetchedAt.Equal(updateTime):
+		t.Errorf("fetched at %s, want %s", got.FetchedAt, updateTime)
+	case !got.Stale:
+		// Degraded mode is a fact about the last attempt, and an operator
+		// asking why a cluster is pulling yesterday's image reads it here.
+		t.Error("stale did not survive the write")
+	}
+}
+
+func testTagLeaseRequiresAProxyEntity(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "shop", meta.Hosted)
+	mustCreateRepo(t, s, "everything", meta.Group)
+
+	for _, name := range []string{"shop", "shop/api", "everything", "everything/api"} {
+		err := s.PutTagLease(ctx(), tagLease(name, "latest", digest("misplaced")))
+		requireErrIs(t, err, meta.ErrInvalid, "PutTagLease under "+name)
+	}
+
+	err := s.PutTagLease(ctx(), tagLease("nothing-here/x", "latest", digest("misplaced")))
+	requireErrIs(t, err, meta.ErrNotFound, "PutTagLease under an absent entity")
+}
+
+func testTagLeaseValidation(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+
+	requireErrIs(t, s.PutTagLease(ctx(), tagLease(repo, "", digest("no-tag"))),
+		meta.ErrInvalid, "PutTagLease without a tag")
+	requireErrIs(t, s.PutTagLease(ctx(), tagLease(repo, "latest", "")),
+		meta.ErrInvalid, "PutTagLease without a digest")
+}
+
+func testTagLeaseDelete(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	repo := "dockerhub/library/nginx"
+
+	if err := s.PutTagLease(ctx(), tagLease(repo, "latest", digest("leased"))); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+	if err := s.DeleteTagLease(ctx(), repo, "latest"); err != nil {
+		t.Fatalf("DeleteTagLease: %v", err)
+	}
+	requireErrIs(t, s.DeleteTagLease(ctx(), repo, "latest"), meta.ErrNotFound, "DeleteTagLease twice")
+
+	// The manifest the lease pointed at stays cached: a tag that vanished
+	// upstream does not make the content it named unreachable by digest, which
+	// is what keeps images pinned by digest working (ADR 0008).
+	mustPutCachedManifest(t, s, repo, digest("leased"))
+	if err := s.PutTagLease(ctx(), tagLease(repo, "latest", digest("leased"))); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+	if err := s.DeleteTagLease(ctx(), repo, "latest"); err != nil {
+		t.Fatalf("DeleteTagLease: %v", err)
+	}
+	if _, err := s.GetCachedManifest(ctx(), repo, digest("leased")); err != nil {
+		t.Errorf("GetCachedManifest after the lease went: %v, want it untouched", err)
+	}
+}
+
+func testTagLeasesDieWithTheRepository(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	mustCreateRepo(t, s, "dockerhub2", meta.Proxy)
+
+	if err := s.PutTagLease(ctx(), tagLease("dockerhub/library/nginx", "latest", digest("leased"))); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+	if err := s.PutTagLease(ctx(), tagLease("dockerhub2/library/nginx", "latest", digest("leased"))); err != nil {
+		t.Fatalf("PutTagLease: %v", err)
+	}
+
+	if err := s.DeleteRepository(ctx(), "dockerhub"); err != nil {
+		t.Fatalf("DeleteRepository: %v", err)
+	}
+
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	if _, err := s.GetTagLease(ctx(), "dockerhub/library/nginx", "latest"); !errors.Is(err, meta.ErrNotFound) {
+		// A proxy recreated at this name points at whatever upstream its own
+		// operator chose; a inherited lease would answer for a remote nobody
+		// configured.
+		t.Errorf("GetTagLease after recreation = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetTagLease(ctx(), "dockerhub2/library/nginx", "latest"); err != nil {
+		t.Errorf("GetTagLease for the neighbour: %v, want it untouched", err)
 	}
 }

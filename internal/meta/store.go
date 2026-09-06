@@ -427,6 +427,30 @@ type CachedContentStore interface {
 	// it, and answering globally would let a proxy serve content its own
 	// routing rules never admitted.
 	GetCachedBlob(ctx context.Context, repo string, digest Digest) (CachedBlob, error)
+
+	// PutTagLease stores or replaces a tag's lease. Replacing is the normal
+	// case: every revalidation writes one, whether the tag moved or not.
+	//
+	// The lease's tag must be non-empty and its digest must name content
+	// (ErrInvalid). There is no foreign key to the cached manifest: a lease is
+	// what the upstream said, and it is written in the same moment as the
+	// manifest it names rather than after it, so a key would make the order of
+	// two writes into a constraint on a mapping that is true regardless.
+	PutTagLease(ctx context.Context, lease TagLease) error
+
+	// GetTagLease returns a tag's lease, or ErrNotFound when the tag has never
+	// been resolved against the upstream. Expiry is the caller's judgement:
+	// the store returns what it holds and the resolver decides whether that is
+	// still good, because the TTL is configuration and configuration changes
+	// between the write and the read (ADR 0008).
+	GetTagLease(ctx context.Context, repo, tag string) (TagLease, error)
+
+	// DeleteTagLease removes a lease, returning ErrNotFound when there was
+	// none. It is what a revalidation does when the upstream says the tag is
+	// gone: keeping the mapping would serve a name its owner deleted, and
+	// keeping it "just in case" is how a proxy outlives the registry it
+	// mirrors.
+	DeleteTagLease(ctx context.Context, repo, tag string) error
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

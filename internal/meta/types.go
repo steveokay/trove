@@ -264,6 +264,54 @@ type CachedBlob struct {
 	LastAccessAt time.Time
 }
 
+// TagLease is a proxy repository's cached answer to "what does this tag point
+// at right now" (ADR 0008, C-005).
+//
+// It is a lease and not a tag, which is the distinction the whole proxy
+// subsystem turns on. A hosted Tag is a fact this registry decides; a lease is
+// somebody else's fact, borrowed for a while. Digests are immutable so cached
+// content never expires, but the mapping from a name to one does, and serving
+// a week-old `:latest` is the failure that makes a pull-through cache worse
+// than no cache at all.
+type TagLease struct {
+	// Repository is the full trove content name, e.g. `dockerhub/library/nginx`.
+	Repository string
+
+	// Tag is the tag as the client asked for it.
+	Tag string
+
+	// Digest is what the tag resolved to at FetchedAt.
+	Digest Digest
+
+	// ETag is what the upstream returned for that manifest, sent back as
+	// If-None-Match on revalidation. Empty when the upstream sent none, which
+	// is why the digest comparison exists alongside it rather than instead:
+	// registries differ in whether they answer 304.
+	ETag string
+
+	// FetchedAt is when the mapping was last confirmed against the upstream --
+	// on a fetch or on a revalidation that found it unchanged. Freshness is
+	// computed from it and never stored, so a lease cannot claim to be fresh
+	// while a clock says otherwise.
+	FetchedAt time.Time
+
+	// TTL is the revalidation interval that was in effect when the lease was
+	// written. It is recorded for the operator, not consulted: the resolver
+	// reads the repository's current TTL, so lowering it takes effect on the
+	// next pull rather than after every lease happens to be rewritten.
+	//
+	// Zero means revalidate on every pull (Q11).
+	TTL time.Duration
+
+	// Stale marks a lease whose last revalidation could not be completed and
+	// which was served anyway in degraded mode (ADR 0008). It is deliberately
+	// not "past its TTL" -- that is derivable from FetchedAt and would drift
+	// the moment it were stored -- but a record of a real event that nothing
+	// else remembers: the upstream was unreachable and this answer is somebody
+	// else's fact from before that.
+	Stale bool
+}
+
 // UploadSession is an in-progress blob upload. Its existence pins the digest
 // against garbage collection (ADR 0010), which is why it is stored rather than
 // held in memory.

@@ -2260,6 +2260,11 @@ func cancellableCalls(ctx context.Context, s meta.Store) []call {
 			return s.PutCachedBlob(ctx, meta.CachedBlob{Repository: "repo", Digest: d, Size: 1})
 		}},
 		{"GetCachedBlob", func() error { _, err := s.GetCachedBlob(ctx, "repo", d); return err }},
+		{"PutTagLease", func() error {
+			return s.PutTagLease(ctx, meta.TagLease{Repository: "repo", Tag: "t", Digest: d})
+		}},
+		{"GetTagLease", func() error { _, err := s.GetTagLease(ctx, "repo", "t"); return err }},
+		{"DeleteTagLease", func() error { return s.DeleteTagLease(ctx, "repo", "t") }},
 		{"PutTag", func() error {
 			return s.PutTag(ctx, meta.Tag{Repository: "repo", Name: "t", Digest: d})
 		}},

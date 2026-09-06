@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveokay/trove/internal/blob"
 	blobmemory "github.com/steveokay/trove/internal/blob/memory"
@@ -31,8 +32,31 @@ type fillEnv struct {
 	meta    *metamemory.Store
 	blobs   *blobmemory.Store
 	events  *fillEvents
+	clock   *fillClock
 	target  proxy.Target
 	fixture clienttest.Fixture
+}
+
+// fillClock is an injected clock a test can move. Lease expiry is a function of
+// time, so C-005's cases advance it rather than sleeping: a test that waited
+// out a fifteen-minute TTL would be a test nobody runs.
+type fillClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newFillClock() *fillClock { return &fillClock{now: testTime} }
+
+func (c *fillClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fillClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }
 
 func newFillEnv(t *testing.T, client proxy.Client, seed clienttest.Fixture) *fillEnv {
@@ -48,8 +72,9 @@ func newFillEnv(t *testing.T, client proxy.Client, seed clienttest.Fixture) *fil
 
 	blobs := blobmemory.New(blobmemory.Options{})
 	events := &fillEvents{}
+	clock := newFillClock()
 	filler, err := proxy.NewFiller(proxy.FillerOptions{
-		Blobs: blobs, Meta: store, Events: events, Now: fixedNow,
+		Blobs: blobs, Meta: store, Events: events, Now: clock.Now,
 	})
 	if err != nil {
 		t.Fatalf("NewFiller: %v", err)
@@ -60,6 +85,7 @@ func newFillEnv(t *testing.T, client proxy.Client, seed clienttest.Fixture) *fil
 		meta:   store,
 		blobs:  blobs,
 		events: events,
+		clock:  clock,
 		target: proxy.Target{
 			Repository: fillEntity + "/" + seed.Repository,
 			Upstream:   seed.Repository,
@@ -1182,13 +1208,21 @@ func TestUnusableContentErrorNamesTheContent(t *testing.T) {
 // upstream cannot produce, such as a manifest media type this registry does
 // not implement.
 type fillStubClient struct {
-	manifest  []byte
-	mediaType string
-	blobErr   error
+	manifest   []byte
+	mediaType  string
+	blobErr    error
+	resolution proxy.Resolution
+	resolveErr error
 }
 
 func (c *fillStubClient) ResolveTag(context.Context, string, string, proxy.Conditional) (proxy.Resolution, error) {
-	return proxy.Resolution{}, proxy.ErrNotFound
+	if c.resolveErr != nil {
+		return proxy.Resolution{}, c.resolveErr
+	}
+	if c.resolution.Digest == "" {
+		return proxy.Resolution{}, proxy.ErrNotFound
+	}
+	return c.resolution, nil
 }
 
 func (c *fillStubClient) FetchManifest(context.Context, string, blob.Digest) ([]byte, string, error) {
@@ -1211,8 +1245,30 @@ func (c *fillStubClient) RateLimit() proxy.RateLimitState { return proxy.RateLim
 type fillBrokenCache struct {
 	proxy.CacheStore
 
-	reads  error
-	writes error
+	reads   error
+	writes  error
+	deletes error
+}
+
+func (c *fillBrokenCache) GetTagLease(ctx context.Context, repo, tag string) (meta.TagLease, error) {
+	if c.reads != nil {
+		return meta.TagLease{}, c.reads
+	}
+	return c.CacheStore.GetTagLease(ctx, repo, tag)
+}
+
+func (c *fillBrokenCache) PutTagLease(ctx context.Context, lease meta.TagLease) error {
+	if c.writes != nil {
+		return c.writes
+	}
+	return c.CacheStore.PutTagLease(ctx, lease)
+}
+
+func (c *fillBrokenCache) DeleteTagLease(ctx context.Context, repo, tag string) error {
+	if c.deletes != nil {
+		return c.deletes
+	}
+	return c.CacheStore.DeleteTagLease(ctx, repo, tag)
 }
 
 func (c *fillBrokenCache) GetCachedManifest(ctx context.Context, repo string, d meta.Digest) (meta.CachedManifest, error) {

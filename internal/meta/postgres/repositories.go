@@ -314,7 +314,7 @@ func (s *Store) DeleteRepository(ctx context.Context, name string) error {
 		// families, because it is deleting the entity that owns them, and it
 		// is deliberately in the repository file rather than in either
 		// content file (ADR 0009).
-		for _, table := range []string{"upload_sessions", "manifests", "cached_manifests", "cached_blobs"} {
+		for _, table := range []string{"upload_sessions", "manifests", "cached_manifests", "cached_blobs", "tag_leases"} {
 			if _, err := sqlutil.Execute(ctx, tx,
 				`DELETE FROM `+table+` WHERE repo_name = $1 OR (repo_name >= $2 AND repo_name < $3)`,
 				name, low, high); err != nil {

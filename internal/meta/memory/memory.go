@@ -67,6 +67,11 @@ type Store struct {
 	cachedRefs      map[string]map[meta.Digest][]meta.CachedManifestRef
 	cachedBlobs     map[string]map[meta.Digest]meta.CachedBlob
 
+	// Tag leases are the mutable half of a proxy: somebody else's mapping,
+	// borrowed until it expires (ADR 0008). They are keyed by repository and
+	// tag, and they hold no reference to the cached manifest they name.
+	tagLeases map[string]map[string]meta.TagLease
+
 	// Pull statistics are keyed by repository and reference and by nothing
 	// else: they are observations, so a row outlives the content it counted
 	// and can be written for content that never existed.
@@ -127,6 +132,7 @@ func newEmpty() *Store {
 		cachedManifests: make(map[string]map[meta.Digest]meta.CachedManifest),
 		cachedRefs:      make(map[string]map[meta.Digest][]meta.CachedManifestRef),
 		cachedBlobs:     make(map[string]map[meta.Digest]meta.CachedBlob),
+		tagLeases:       make(map[string]map[string]meta.TagLease),
 
 		pullStats: make(map[pullKey]meta.PullStats),
 		events:    make(map[string]meta.Event),

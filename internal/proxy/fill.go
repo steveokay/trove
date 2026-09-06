@@ -29,6 +29,14 @@ type CacheStore interface {
 	PutCachedManifest(ctx context.Context, m meta.CachedManifest, refs []meta.CachedManifestRef) error
 	GetCachedBlob(ctx context.Context, repo string, digest meta.Digest) (meta.CachedBlob, error)
 	PutCachedBlob(ctx context.Context, b meta.CachedBlob) error
+
+	// The lease half (C-005). It is in the same interface because it is the
+	// same table family and the same subsystem: a resolution writes a lease and
+	// the manifest it names, and splitting them would mean two views of one
+	// cache that could be wired to different stores.
+	GetTagLease(ctx context.Context, repo, tag string) (meta.TagLease, error)
+	PutTagLease(ctx context.Context, lease meta.TagLease) error
+	DeleteTagLease(ctx context.Context, repo, tag string) error
 }
 
 // CacheBlobStore is the cache-rooted blob store (ADR 0007): a store that can
@@ -73,7 +81,42 @@ type Target struct {
 
 	// Client fetches from that remote.
 	Client Client
+
+	// TagTTL is how long a tag's resolution may be reused before it is
+	// revalidated against the upstream (ADR 0008). It is the repository's
+	// current setting, read on every resolution rather than taken from the
+	// stored lease, so lowering it takes effect on the next pull.
+	//
+	// **Zero means revalidate on every pull** (Q11) and is therefore not a
+	// missing value the package can fill in: the deployment-wide default of 15
+	// minutes is applied by whoever builds the Target from configuration, and
+	// a zero-value Target is deliberately the conservative one.
+	TagTTL time.Duration
+
+	// Offline is what to do when the upstream cannot be reached and the lease
+	// has expired. The zero value is serve-stale, which is the configured
+	// default and the one that keeps a cluster running.
+	Offline OfflineMode
 }
+
+// OfflineMode is a proxy's degraded-mode behaviour (ADR 0008).
+type OfflineMode string
+
+// The modes. The zero value is ServeStale on purpose: an unset mode must keep
+// pulls working, because the alternative fails a cluster's deploys over a
+// configuration field somebody did not know to set.
+const (
+	// ServeStale serves cached content past its revalidation deadline when the
+	// upstream is unreachable, marked stale and reported as an event.
+	ServeStale OfflineMode = "serve-stale"
+
+	// Strict fails the pull instead. It exists for deployments that would
+	// rather stop than serve an answer they could not confirm.
+	Strict OfflineMode = "strict"
+)
+
+// strict reports whether the mode refuses to serve stale content.
+func (m OfflineMode) strict() bool { return m == Strict }
 
 func (t Target) validate() error {
 	switch {
@@ -244,6 +287,19 @@ func (f *Filler) Manifest(ctx context.Context, t Target, digest blob.Digest) (Ma
 		return ManifestResult{}, err
 	}
 
+	return f.storeManifest(ctx, t, digest, payload, mediaType)
+}
+
+// storeManifest parses upstream manifest bytes, caches them, and reports what
+// was served.
+//
+// It is shared with tag resolution (C-005), which arrives at the same point by
+// a different road: a revalidation that found the tag moved already holds the
+// new manifest, and re-fetching it by digest to reach this code would pay for
+// the same bytes twice.
+func (f *Filler) storeManifest(ctx context.Context, t Target, digest blob.Digest,
+	payload []byte, mediaType string,
+) (ManifestResult, error) {
 	parsed, err := artifact.Parse(mediaType, payload)
 	if err != nil {
 		return ManifestResult{}, &UnusableContentError{

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/meta/sqlutil"
@@ -186,6 +187,83 @@ func (s *Store) PutCachedBlob(ctx context.Context, b meta.CachedBlob) error {
 			sqlutil.Millis(b.CachedAt), sqlutil.Millis(b.LastAccessAt))
 		return err
 	})
+}
+
+const tagLeaseColumns = `repo_name, tag, digest, etag, fetched_at, ttl_s, stale`
+
+// PutTagLease stores or replaces a tag's lease.
+func (s *Store) PutTagLease(ctx context.Context, lease meta.TagLease) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	switch {
+	case lease.Tag == "":
+		return meta.Invalid("tag", "must not be empty")
+	case lease.Digest == "":
+		return meta.Invalid("digest", "must not be empty")
+	}
+
+	return sqlutil.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		if err := s.requireProxyEntity(ctx, tx, lease.Repository); err != nil {
+			return err
+		}
+		_, err := sqlutil.Execute(ctx, tx,
+			`INSERT INTO tag_leases (`+tagLeaseColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (repo_name, tag) DO UPDATE SET
+			     digest = excluded.digest,
+			     etag = excluded.etag,
+			     fetched_at = excluded.fetched_at,
+			     ttl_s = excluded.ttl_s,
+			     stale = excluded.stale`,
+			lease.Repository, lease.Tag, string(lease.Digest), lease.ETag,
+			sqlutil.Millis(lease.FetchedAt), int64(lease.TTL/time.Second), lease.Stale)
+		return err
+	})
+}
+
+// GetTagLease returns a tag's lease.
+func (s *Store) GetTagLease(ctx context.Context, repo, tag string) (meta.TagLease, error) {
+	if err := s.ready(ctx); err != nil {
+		return meta.TagLease{}, err
+	}
+
+	var (
+		lease   meta.TagLease
+		digest  string
+		fetched sql.NullInt64
+		ttl     int64
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+tagLeaseColumns+` FROM tag_leases WHERE repo_name = ? AND tag = ?`,
+		repo, tag).Scan(&lease.Repository, &lease.Tag, &digest, &lease.ETag,
+		&fetched, &ttl, &lease.Stale)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return meta.TagLease{}, meta.NotFound("tag lease", tag)
+	case err != nil:
+		return meta.TagLease{}, fmt.Errorf("scan tag lease: %w", err)
+	}
+	lease.Digest = meta.Digest(digest)
+	lease.FetchedAt = sqlutil.AsTime(fetched)
+	lease.TTL = time.Duration(ttl) * time.Second
+	return lease, nil
+}
+
+// DeleteTagLease removes a lease.
+func (s *Store) DeleteTagLease(ctx context.Context, repo, tag string) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+
+	affected, err := sqlutil.Execute(ctx, s.db,
+		`DELETE FROM tag_leases WHERE repo_name = ? AND tag = ?`, repo, tag)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return meta.NotFound("tag lease", tag)
+	}
+	return nil
 }
 
 // GetCachedBlob returns one cached blob record.

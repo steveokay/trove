@@ -160,6 +160,73 @@ func (s *Store) GetCachedBlob(ctx context.Context, repo string, digest meta.Dige
 	return b, nil
 }
 
+// PutTagLease stores or replaces a tag's lease.
+func (s *Store) PutTagLease(ctx context.Context, lease meta.TagLease) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if err := s.requireProxyEntity(lease.Repository); err != nil {
+		return err
+	}
+	switch {
+	case lease.Tag == "":
+		return meta.Invalid("tag", "must not be empty")
+	case lease.Digest == "":
+		return meta.Invalid("digest", "must not be empty")
+	}
+
+	if s.tagLeases[lease.Repository] == nil {
+		s.tagLeases[lease.Repository] = make(map[string]meta.TagLease)
+	}
+	s.tagLeases[lease.Repository][lease.Tag] = lease
+	return nil
+}
+
+// GetTagLease returns a tag's lease.
+func (s *Store) GetTagLease(ctx context.Context, repo, tag string) (meta.TagLease, error) {
+	if err := ctx.Err(); err != nil {
+		return meta.TagLease{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return meta.TagLease{}, err
+	}
+
+	lease, ok := s.tagLeases[repo][tag]
+	if !ok {
+		return meta.TagLease{}, meta.NotFound("tag lease", tag)
+	}
+	return lease, nil
+}
+
+// DeleteTagLease removes a lease.
+func (s *Store) DeleteTagLease(ctx context.Context, repo, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+
+	if _, ok := s.tagLeases[repo][tag]; !ok {
+		return meta.NotFound("tag lease", tag)
+	}
+	delete(s.tagLeases[repo], tag)
+	return nil
+}
+
 // deleteCachedContent drops every cached row stored under an entity. It is
 // called from DeleteRepository, with the lock held.
 //
@@ -177,6 +244,11 @@ func (s *Store) deleteCachedContent(entity string) {
 	for content := range s.cachedBlobs {
 		if belongsTo(content, entity) {
 			delete(s.cachedBlobs, content)
+		}
+	}
+	for content := range s.tagLeases {
+		if belongsTo(content, entity) {
+			delete(s.tagLeases, content)
 		}
 	}
 }
