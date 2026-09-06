@@ -91,6 +91,16 @@ func (o MemberOutcome) String() string {
 type MemberState struct {
 	// Repository is the member entity's name.
 	Repository string
+	// Content is the full content name a request would ask this member for --
+	// `dockerhub/library/nginx` for a member `dockerhub` serving a group pull
+	// of `library/nginx`. It is what the permission filter decides against
+	// (C-012), because a subject scoped to `dockerhub/*` may read that content
+	// and may not read the bare entity name, and deciding against the entity
+	// would hide a member whose content the subject is entitled to.
+	//
+	// Resolve itself never reads it: which member wins is a function of
+	// position and outcome alone.
+	Content string
 	// Type is the member's repository type, carried so that a group inside a
 	// group is caught here rather than resolved. Groups do not nest (ADR 0005)
 	// and the configuration layer refuses to create such a member; this is the
@@ -209,6 +219,11 @@ func (r Resolution) String() string {
 // Resolve is the group resolution function of ADR 0005: a pure fold over an
 // already permission-filtered member list.
 //
+// It takes a MemberSet rather than a slice, so "already permission-filtered" is
+// a property of the type rather than a sentence in this comment: the only ways
+// to build one are VisibleMembers, which filters for a subject, and AllMembers,
+// which says in as many words that the caller has none (C-012).
+//
 // It performs no I/O, takes no store and no clock, and holds no upstream
 // client. The caller asks the members -- in whatever order and with whatever
 // concurrency it likes -- and hands in what they said. The rules:
@@ -244,14 +259,14 @@ func (r Resolution) String() string {
 // asked. Those are 500-class programming errors and refusing loudly is the
 // point; the metadata schema already makes the first three impossible, which is
 // why this is an assertion rather than a code path with a recovery.
-func Resolve(members []MemberState, reference string) Resolution {
+func Resolve(set MemberSet, reference string) Resolution {
 	resolution := Resolution{Reference: reference}
 
 	// The list is checked whole and before anything is resolved: a member list
 	// that is wrong is wrong regardless of which member happens to answer
 	// first, and finding that out only when a particular member goes down is
 	// how a latent misconfiguration becomes an outage.
-	ordered, err := orderMembers(members)
+	ordered, err := orderMembers(set.members)
 	if err != nil {
 		resolution.Err = err
 		return resolution

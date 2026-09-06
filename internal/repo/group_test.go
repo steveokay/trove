@@ -208,7 +208,7 @@ func TestResolve(t *testing.T) {
 			// The caller's slice must come back untouched: a pure function
 			// that reorders its input is not one.
 			before := slices.Clone(tt.members)
-			got := repo.Resolve(tt.members, "v1.2.3")
+			got := repo.Resolve(repo.AllMembers(tt.members...), "v1.2.3")
 			if !slices.Equal(tt.members, before) {
 				t.Errorf("Resolve reordered its caller's slice: %+v", tt.members)
 			}
@@ -322,7 +322,7 @@ func TestResolveRefusesUnresolvableMemberLists(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := repo.Resolve(tt.members, "latest")
+			got := repo.Resolve(repo.AllMembers(tt.members...), "latest")
 			if got.Outcome != repo.GroupInvalid {
 				t.Fatalf("Resolve = %+v, want GroupInvalid", got)
 			}
@@ -350,9 +350,9 @@ func TestResolveRefusesUnresolvableMemberLists(t *testing.T) {
 func TestGroupErrorNamesTheMember(t *testing.T) {
 	t.Parallel()
 
-	got := repo.Resolve([]repo.MemberState{
-		{Repository: "inner", Type: meta.Group, Position: 0, Outcome: repo.MemberServed},
-	}, "latest")
+	got := repo.Resolve(repo.AllMembers(
+		repo.MemberState{Repository: "inner", Type: meta.Group, Position: 0, Outcome: repo.MemberServed},
+	), "latest")
 	var groupErr *repo.GroupError
 	if !errors.As(got.Err, &groupErr) {
 		t.Fatalf("error %v is not a *repo.GroupError", got.Err)
@@ -430,7 +430,7 @@ func TestResolveIsDeterministicUnderPermutation(t *testing.T) {
 		proxyMember(member("d", 3, repo.MemberServed)),
 		member("e", 4, repo.MemberServed),
 	}
-	want := repo.Resolve(members, "latest")
+	want := repo.Resolve(repo.AllMembers(members...), "latest")
 	if want.Outcome != repo.GroupServed || want.Member != "d" {
 		t.Fatalf("fixture resolves to %+v, which is not the case this test is about", want)
 	}
@@ -439,7 +439,7 @@ func TestResolveIsDeterministicUnderPermutation(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	for range 200 {
 		rng.Shuffle(len(permuted), func(i, j int) { permuted[i], permuted[j] = permuted[j], permuted[i] })
-		if got := repo.Resolve(permuted, "latest"); !reflect.DeepEqual(got, want) {
+		if got := repo.Resolve(repo.AllMembers(permuted...), "latest"); !reflect.DeepEqual(got, want) {
 			t.Fatalf("permutation %+v resolved to %+v, want %+v", permuted, got, want)
 		}
 	}
@@ -497,7 +497,7 @@ func FuzzResolve(f *testing.F) {
 			encoded = encoded[:64]
 		}
 		members := fuzzMembers(encoded)
-		got := repo.Resolve(members, "latest")
+		got := repo.Resolve(repo.AllMembers(members...), "latest")
 
 		// The list is structurally well formed by construction, so a refusal
 		// can only mean an unasked member before the winner.
@@ -520,7 +520,7 @@ func FuzzResolve(f *testing.F) {
 		// the corpus entry rather than only from the crasher.
 		rng := rand.New(rand.NewSource(int64(seed)))
 		rng.Shuffle(len(permuted), func(i, j int) { permuted[i], permuted[j] = permuted[j], permuted[i] })
-		if again := repo.Resolve(permuted, "latest"); !reflect.DeepEqual(again, got) {
+		if again := repo.Resolve(repo.AllMembers(permuted...), "latest"); !reflect.DeepEqual(again, got) {
 			t.Fatalf("permuting the member list changed the answer: %+v vs %+v", again, got)
 		}
 

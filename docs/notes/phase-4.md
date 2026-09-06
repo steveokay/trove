@@ -375,3 +375,57 @@ touching proxy internals: `Backoff.Snapshot` for the backoff state, and
 `Client.RateLimit()` — which C-002 already populates from
 `RateLimit-Limit`/`RateLimit-Remaining` — for the headroom itself. Coverage
 96.3% overall, `backoff.go` at 100%.
+
+## C-012 — Permission filtering before group resolution
+
+§4 calls a group the single easiest place in the registry to leak the existence
+of a repository, and the reason is mechanical: resolution is first-match-wins
+over an ordered member list, so *which* member answers is observable in the
+digest that comes back. A member the subject cannot read must not be able to
+win, to fail the group, or to appear in a skip list — and it must not be able to
+change the answer by being there at all.
+
+**The wall is the type.** `Resolve` no longer takes a slice: it takes a
+`repo.MemberSet`, and the only two ways to build one are `VisibleMembers`,
+which filters for a subject, and `AllMembers`, which says in as many words that
+the caller has no subject to filter for. That is the shape `meta.Visibility`
+already uses for the same problem (§5.3) — a bare slice reads as "no filtering"
+and would silently mean "everything" — and adopting it here is a deliberate
+change to C-011's frozen signature, made because the alternative is a comment
+asking callers to remember. `AllMembers` is named rather than implicit so a
+reviewer can ask whose members these are; nothing serving a request may use it,
+because a request always has a subject even when that subject is anonymous.
+
+**The decision is `repo:read` against the member's content name**, not against
+the member entity. A subject bound to `dockerhub/*` may read
+`dockerhub/library/nginx` and may not read the bare name `dockerhub` (ADR 0001's
+scope grammar), so deciding against the entity would hide a member whose content
+the subject is entitled to and turn a legitimate pull into a 404. `MemberState`
+therefore carries `Content` — what a request would ask that member for —
+supplied by the caller, which is the only party that knows how the group's
+reference maps onto each member. A member with no `Content`, or one whose
+`Content` is not a legal repository name, is dropped: no decision was reached
+about it, and a check that did not complete must not admit the request.
+
+**Removed, not skipped.** A skipped member appears in the resolution and in a
+`group.member.skipped` event that names it; a removed one appears nowhere. The
+sharpest case is a *required* member that is down: it fails the group 503-class
+for a subject that may read it, and does not exist at all for one that may not,
+which is exactly right — a group cannot be made unavailable for you by a member
+you are not allowed to know about. Positions survive filtering with their gaps
+intact, because renumbering would make a subject's view of the ordering depend
+on what it cannot see, and `MemberSet` copies in both directions so a caller can
+neither edit a filtered member back in nor answer for one that was never in the
+set.
+
+The disclosure suite's **group-resolution surface is unskipped** and runs the
+real pipeline: effective bindings out of the store, the same filter, the same
+fold. Its assertions are differential rather than positive — carol's answer is
+compared field for field against what a group configured without the hidden
+member returns, and anonymous's against an empty group's.
+
+**What is deliberately still missing** is the HTTP half. Nothing mounts group
+(or proxy) serving on `/v2/` yet and no task in status.md owns that wiring; when
+it lands it inherits this contract rather than restating it, and the suite gains
+the request-level version of these cases. Coverage 96.3% overall,
+`group_filter.go` at 100%.

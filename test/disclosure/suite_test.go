@@ -37,7 +37,6 @@ var pendingSurfaces = map[string]string{
 	"cross-repo search":                    "E-010",
 	"webhook event delivery":               "E-004",
 	"metric label values":                  "E-006",
-	"group resolution":                     "C-012",
 	"scan and policy reports":              "S-006",
 	"audit log (the deliberate exception)": "E-009",
 }
