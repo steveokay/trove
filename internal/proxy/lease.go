@@ -237,7 +237,7 @@ func (f *Filler) resolveFailed(ctx context.Context, t Target, tag string,
 		return TagResolution{}, err
 	}
 
-	reason, degraded := degradedReason(err)
+	cause, degraded := Classify(err)
 	if !degraded || !held || t.Offline.strict() {
 		return TagResolution{}, err
 	}
@@ -256,27 +256,8 @@ func (f *Filler) resolveFailed(ctx context.Context, t Target, tag string,
 		f.writeLease(ctx, stale)
 	}
 
-	f.publishStale(ctx, t, tag, blob.Digest(lease.Digest), staleFor, reason)
+	f.publishStale(ctx, t, tag, blob.Digest(lease.Digest), staleFor, cause)
 	return TagResolution{Digest: blob.Digest(lease.Digest), Stale: true, StaleFor: staleFor}, nil
-}
-
-// degradedReason classifies a failure as one that degraded mode covers, and
-// names it for the event.
-//
-// Only unreachability and throttling qualify. A refused credential is
-// configuration, and a refused redirect is a security event an operator has to
-// see (C-002) -- serving stale content through either would replace a loud
-// failure with a quiet one. C-008 refines the first bucket into dial, DNS, and
-// timeout; the decision made here does not change with it.
-func degradedReason(err error) (string, bool) {
-	switch {
-	case errors.Is(err, ErrRateLimited):
-		return "rate-limited", true
-	case errors.Is(err, ErrUpstreamUnavailable):
-		return "unreachable", true
-	default:
-		return "", false
-	}
 }
 
 // writeLease stores a lease, logging rather than failing.
@@ -303,7 +284,7 @@ func (f *Filler) dropLease(ctx context.Context, t Target, tag string) {
 // of the three ways degraded mode is visible (header, event, metric), and the
 // one an operator can subscribe to.
 func (f *Filler) publishStale(ctx context.Context, t Target, tag string,
-	digest blob.Digest, staleFor time.Duration, reason string,
+	digest blob.Digest, staleFor time.Duration, cause DegradedCause,
 ) {
 	if f.events == nil {
 		return
@@ -318,7 +299,7 @@ func (f *Filler) publishStale(ctx context.Context, t Target, tag string,
 			Reference:    tag,
 			Digest:       digest.String(),
 			StaleSeconds: int64(staleFor / time.Second),
-			Reason:       reason,
+			Reason:       string(cause),
 		},
 	})
 }

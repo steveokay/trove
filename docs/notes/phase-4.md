@@ -269,3 +269,50 @@ cannot be written or cleared costs one upstream request and is logged, while a
 record that cannot be *read* fails the resolution — working around a broken
 metadata store by asking the upstream harder is exactly how a cache becomes a
 stampede. Coverage 96.2% overall, `negative.go` at 100%.
+
+## C-008 — Offline / degraded mode
+
+C-005 already decided *which* failures degraded mode covers; C-008 is the
+reason, and the proof that the reason survives net/http. `internal/proxy/
+degraded.go` classifies a failure into four causes — `unreachable`, `timeout`,
+`upstream-error`, `rate-limited` — and reports whether it is degraded at all.
+The set is small deliberately: an operator acts on "is it us, them, or the
+network" and on "will waiting help", and a taxonomy of every errno underneath
+would be a list nobody could route on, with the underlying error still there
+for anybody who wants it.
+
+**The classification reads the client's typed errors rather than the message
+text.** A transport failure carries the net error it wrapped and a status
+failure carries the status, which is what makes it possible to tell a resolver
+that timed out from one that answered "no such host" — by the time an error is
+a string, it cannot be. Three details are load-bearing: the rate-limit check
+matches the *sentinel* rather than the struct, so a `Client` this package did
+not write is classified by the contract it is held to; our own header deadline
+is recognised through the client's internal sentinel, because the client
+deliberately reports it in place of the cancellation that enforced it; and
+anything else still claiming unavailability is treated as an outage, since
+silently not covering an unrecognised implementation would disable
+stale-serving for it.
+
+**What is not covered stays uncovered**: a rejected credential, a refused
+redirect, an invalid reference, and a manifest too large. None is weather, and
+an SSRF attempt in particular must never end up behind a stale-content warning
+(C-002's `ErrRedirectRefused` exists for exactly this).
+
+**The fault matrix drives real client errors through a real transport** — a
+dialer that fails with `net.DNSError{IsNotFound}` (the acceptance criterion's
+blackholed DNS, without a resolver in the test's way), one that fails with
+`IsTimeout`, a dial-deadline `net.OpError`, a refused connection, a reset, a
+stalled upstream against the client's own 50 ms header timeout, a 500, a 429, a
+rejected token, an off-host redirect, and a genuine not-found. End to end, the
+blackholed case then proves all three behaviours in one place: the cached tag is
+served stale with `cache.stale-served` naming `unreachable`, an uncached tag and
+an uncached manifest fail cleanly, and flipping `Offline` to `strict` on the
+next call changes the answer with no restart and nothing to invalidate — the
+mode is per-call configuration, so that *is* the runtime switch.
+
+Two deliberate absences. The `Warning: 110 - "response is stale"` header ADR
+0008 asks for belongs to the HTTP path, which does not exist yet; `Stale` and
+`StaleFor` on the resolution are what that task will render it from. And the
+backoff that a `rate-limited` cause should feed is C-009's — this task
+classifies, it does not sleep. Coverage 96.3% overall, `degraded.go` at 100%.
