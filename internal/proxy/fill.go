@@ -187,11 +187,12 @@ type BlobResult struct {
 //     The asymmetry is deliberate and is the reason both result types carry a
 //     flag saying whether the cache actually holds what was served.
 type Filler struct {
-	blobs  CacheBlobStore
-	meta   CacheStore
-	events Publisher
-	now    func() time.Time
-	log    *slog.Logger
+	blobs     CacheBlobStore
+	meta      CacheStore
+	events    Publisher
+	coalescer Coalescer
+	now       func() time.Time
+	log       *slog.Logger
 }
 
 // FillerOptions configures a Filler.
@@ -205,6 +206,12 @@ type FillerOptions struct {
 	// Events receives cache.filled and blob.corrupt. Nil means nobody is
 	// listening.
 	Events Publisher
+
+	// Coalescer collapses concurrent identical fills (C-006). Nil means a
+	// fresh in-process group, which is the v1 answer (ADR 0018); the field
+	// exists so a deployment that later coordinates across processes can
+	// supply one without this package changing.
+	Coalescer Coalescer
 
 	// Now is the clock. Nil means time.Now. Cached-at and last-accessed
 	// timestamps read it and nothing in this package reads the wall clock
@@ -227,11 +234,15 @@ func NewFiller(opts FillerOptions) (*Filler, error) {
 	}
 
 	f := &Filler{
-		blobs:  opts.Blobs,
-		meta:   opts.Meta,
-		events: opts.Events,
-		now:    opts.Now,
-		log:    opts.Log,
+		blobs:     opts.Blobs,
+		meta:      opts.Meta,
+		events:    opts.Events,
+		coalescer: opts.Coalescer,
+		now:       opts.Now,
+		log:       opts.Log,
+	}
+	if f.coalescer == nil {
+		f.coalescer = NewSingleFlight()
 	}
 	if f.now == nil {
 		f.now = time.Now
@@ -261,6 +272,23 @@ func (f *Filler) Manifest(ctx context.Context, t Target, digest blob.Digest) (Ma
 		return ManifestResult{}, &ReferenceError{Kind: "digest", Value: string(digest), Reason: err.Error()}
 	}
 
+	result, err := coalesce(ctx, f.coalescer, manifestKey(t.Repository, digest),
+		func(ctx context.Context) (ManifestResult, error) { return f.manifest(ctx, t, digest) })
+	if err != nil {
+		return ManifestResult{}, err
+	}
+
+	// The payload is copied out of the shared result. Without coalescing every
+	// caller held its own bytes -- each store read returns a fresh slice -- and
+	// a caller that could suddenly be handed somebody else's buffer, depending
+	// on whether it happened to race, is a data race waiting for the first
+	// caller that writes into what it was given.
+	result.Payload = append([]byte(nil), result.Payload...)
+	return result, nil
+}
+
+// manifest is Manifest's body, run once per digest across concurrent callers.
+func (f *Filler) manifest(ctx context.Context, t Target, digest blob.Digest) (ManifestResult, error) {
 	cached, err := f.meta.GetCachedManifest(ctx, t.Repository, meta.Digest(digest))
 	switch {
 	case err == nil:

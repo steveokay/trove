@@ -91,6 +91,16 @@ func (f *Filler) ResolveTag(ctx context.Context, t Target, tag string) (TagResol
 		return TagResolution{}, &ReferenceError{Kind: "tag", Value: tag, Reason: "must not be empty"}
 	}
 
+	// Coalesced by repository and tag (C-006): fifty pods starting at once
+	// resolve `:latest` once. The manifest fetch that a changed tag triggers is
+	// inside this call and so is covered by the same flight, which is what
+	// makes "one resolve and one fetch" true rather than "one resolve".
+	return coalesce(ctx, f.coalescer, tagKey(t.Repository, tag),
+		func(ctx context.Context) (TagResolution, error) { return f.resolveTag(ctx, t, tag) })
+}
+
+// resolveTag is ResolveTag's body, run once per tag across concurrent callers.
+func (f *Filler) resolveTag(ctx context.Context, t Target, tag string) (TagResolution, error) {
 	lease, held, err := f.lease(ctx, t, tag)
 	if err != nil {
 		return TagResolution{}, err

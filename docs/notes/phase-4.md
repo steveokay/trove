@@ -185,3 +185,48 @@ cold pulls still make N resolutions), negative caching (C-007 — a typo'd tag
 reaches the upstream every time), and the serving-path wiring, which lands with
 the task that mounts proxy pulls on `/v2/`. Coverage 96.2% overall, `lease.go`
 at 100%.
+
+## C-006 — Single-flight on concurrent cache fill
+
+Fifty pods starting at once pull the same tag at once, and a cache that
+stampedes on a cold start spends exactly the upstream quota it exists to
+protect. `internal/proxy/coalesce.go` collapses those into one flight:
+`Coalescer` is the seam ADR 0018 asked for and `SingleFlight` is its v1 body,
+an in-process `singleflight.Group`, which is the right shape while one process
+owns its data directory.
+
+Two contract details are load-bearing. The shared work runs under a context
+**detached from cancellation** while each caller waits under its own: the
+leader is not special, so its client disconnecting must not fail the fifty
+waiters behind it, and a waiter that goes away must not be held by work it no
+longer needs. What bounds the detached work is the client's own request timeout
+(C-002), which every upstream call already carries. And the manifest payload is
+**copied out of the shared result**: before coalescing every caller held its own
+bytes, because each store read returns a fresh slice, and a caller that could
+suddenly be handed somebody else's buffer depending on whether it happened to
+race is a data race waiting for the first caller that writes into what it was
+given.
+
+**Blobs are deliberately not coalesced.** A stream has one reader, so there is
+nothing to share; two concurrent fills of one layer make two upstream fetches
+and converge at the content-addressed store instead, which C-004 already proves.
+Fanning one body out to N readers is a buffering problem, not a coalescing one,
+and it would trade a bounded duplicate fetch for an unbounded memory cost.
+
+`Coalescer` cannot be generic — a method with a type parameter is not
+expressible in Go — so the typed work goes through a free function that asserts
+the result. A wrong type is an error rather than a panic, because the interface
+is an extension point and a third implementation getting it wrong should fail
+the request that hit it rather than the process.
+
+**Testing concurrency without flake.** The leading caller is blocked *inside*
+the upstream client before any other caller starts, so every waiter is
+guaranteed to join a flight still in progress; the exactly-once counts are
+asserted in the success cases, where a straggler that misses the flight reads
+the cache and the upstream is still called once — which is C-006's acceptance
+criterion as written. The failure case deliberately asserts no count: a failed
+flight caches nothing, so a caller arriving after it starts one of its own, and
+that is the right behaviour rather than serving one upstream hiccup to everybody
+who asks for the next minute. What replaces the count there is a deterministic
+wiring test with a recording `Coalescer`, which pins both keys and proves the
+blob path is not among them. Coverage 96.2% overall, `coalesce.go` at 100%.
