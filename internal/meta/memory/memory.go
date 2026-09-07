@@ -58,6 +58,11 @@ type Store struct {
 	blobs   map[meta.Digest]meta.Blob
 	uploads map[string]meta.UploadSession
 
+	// Garbage-collection runs: where a sweep had got to, so an interrupted
+	// one resumes rather than restarting (ADR 0010). Hosted-only, like
+	// everything else a sweep can name.
+	gcRuns map[string]meta.GCRun
+
 	// Cached proxy content is a second set of maps, sharing nothing with the
 	// hosted ones above: the in-memory form of ADR 0006's separate table
 	// families and of ADR 0009's separation. Cached blobs are keyed by
@@ -132,6 +137,7 @@ func newEmpty() *Store {
 		tags:      make(map[string]map[string]meta.Tag),
 		blobs:     make(map[meta.Digest]meta.Blob),
 		uploads:   make(map[string]meta.UploadSession),
+		gcRuns:    make(map[string]meta.GCRun),
 
 		cachedManifests: make(map[string]map[meta.Digest]meta.CachedManifest),
 		cachedRefs:      make(map[string]map[meta.Digest][]meta.CachedManifestRef),

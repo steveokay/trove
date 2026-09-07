@@ -22,6 +22,7 @@ type Store interface {
 	ProxyCredentialStore
 	ContentStore
 	CachedContentStore
+	GCCollectionStore
 	IdentityStore
 	CredentialStore
 	EventStore
@@ -532,6 +533,89 @@ type CachedContentStore interface {
 	// The time never moves backwards, however the batch is ordered, so a
 	// flush that arrives late cannot make hot content look cold.
 	TouchCached(ctx context.Context, accesses []CacheAccess) error
+}
+
+// GCCollectionStore is what a garbage-collection sweep may ask of the metadata
+// store: which hosted blobs look reclaimable, whether one still is at the
+// moment of deleting it, and where the sweep had got to (ADR 0010, P-007).
+//
+// It is the hosted twin of the cached family's eviction half, and it is a
+// separate interface for the same reason: internal/gc is constructed with this
+// view and the hosted blob store, and there is no argument through which the
+// cached half could arrive (ADR 0009 wall 2). Nothing here can name a cached
+// table, and nothing in CachedContentStore can name a hosted one.
+//
+// The mark is not a snapshot. ADR 0010 describes computing a mark set and
+// bounding its age on resume, which is the shape reference-counting-free GC
+// usually takes; here reachability is evaluated inside the candidate query
+// instead, so there is no stale set to age out and a resumed sweep needs no
+// rule beyond "carry on from the cursor". The clarification is recorded on the
+// ADR.
+type GCCollectionStore interface {
+	// ListSweepCandidates returns hosted blobs that look reclaimable, in
+	// digest order, starting after the cursor.
+	//
+	// A candidate satisfies all three of ADR 0010's conditions at query time:
+	// no live manifest references it as a config or a layer, it was created
+	// before the grace deadline, and no upload session pins its digest. The
+	// caller must still re-check at delete time -- that is what
+	// DeleteBlobIfUnreferenced is for -- because a listing is a statement
+	// about the past the moment it returns.
+	//
+	// Child-manifest and subject edges are deliberately not consulted: they
+	// name manifests, whose payloads live in their own rows rather than in the
+	// blob store, so a blob is referenced only as a config or a layer. A
+	// sweep that also marked those digests would protect blobs nothing stores
+	// and, worse, would read as though it understood the difference.
+	//
+	// A limit of zero or less returns nothing rather than everything, for the
+	// reason ListEvictable does: a sweep that asked for "no rows" and was
+	// handed millions meant to ask for something else.
+	ListSweepCandidates(ctx context.Context, before time.Time, after Digest, limit int) ([]Blob, error)
+
+	// DeleteBlobIfUnreferenced removes a blob row only if every sweep
+	// condition still holds, re-checked inside the delete's own transaction,
+	// and reports whether it went.
+	//
+	// This is the safety property the whole design rests on. A manifest PUT
+	// inserts its reference rows in one transaction with the existence check
+	// that admitted it, so a reference created before this transaction commits
+	// is seen here and stops the delete, and one created after it fails the
+	// PUT's existence check instead -- which is a re-upload, and spec-legal.
+	// Every failure mode degrades to a leaked blob, reclaimed by a later
+	// sweep; none of them loses a referenced one.
+	//
+	// A blob that is no longer a candidate is (false, nil), not an error: the
+	// re-check refusing is the system working, and a sweep that logged an
+	// error every time somebody pushed would teach an operator to ignore it.
+	DeleteBlobIfUnreferenced(ctx context.Context, digest Digest, before time.Time) (deleted bool, err error)
+
+	// StartGCRun records a sweep beginning. The run's identifier comes from
+	// the caller, as an upload session's does, so the row and the work it
+	// describes start together.
+	StartGCRun(ctx context.Context, run GCRun) error
+
+	// SaveGCProgress advances a run's cursor and counters after a batch, so an
+	// interrupted sweep resumes where it stopped rather than from the
+	// beginning. Counters are set, not added: the caller owns the totals, and
+	// a resumed run continues them.
+	SaveGCProgress(ctx context.Context, id string, cursor Digest, scanned, deleted, freedBytes int64) error
+
+	// FinishGCRun closes a run, recording why it stopped -- empty for success.
+	// It is what makes an unfinished row mean "interrupted" rather than
+	// "old".
+	FinishGCRun(ctx context.Context, id string, at time.Time, failure string) error
+
+	// GetGCRun returns one run by identifier, or ErrNotFound.
+	GetGCRun(ctx context.Context, id string) (GCRun, error)
+
+	// ResumableGCRun returns the most recently started unfinished run, or
+	// ErrNotFound when every run has ended.
+	//
+	// There is at most one that matters: the scheduler runs one sweep at a
+	// time (P-006's overlap guard), so an unfinished row is a sweep that was
+	// interrupted rather than one racing this caller.
+	ResumableGCRun(ctx context.Context) (GCRun, error)
 }
 
 // IdentityStore manages subjects, groups, roles, and bindings: everything the

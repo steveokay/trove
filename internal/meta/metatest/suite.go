@@ -86,6 +86,7 @@ func Run(t *testing.T, f Factory) {
 		{"CloseIsIdempotent", testCloseIsIdempotent},
 	}
 	tests = append(tests, cachedTests()...)
+	tests = append(tests, gcTests()...)
 	tests = append(tests, identityTests()...)
 	tests = append(tests, credentialTests()...)
 

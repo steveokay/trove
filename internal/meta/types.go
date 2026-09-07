@@ -180,6 +180,57 @@ type Blob struct {
 	CreatedAt time.Time
 }
 
+// GCRun is one garbage-collection sweep: where it had got to, what window it
+// was sweeping, and what it took (ADR 0010, P-007).
+//
+// It is stored rather than held in memory because a sweep over a large
+// registry does not finish in one go, and the thing it is doing -- deleting
+// bytes nothing can recreate -- is the worst operation in this system to get
+// wrong twice. An interrupted sweep resumes from the cursor rather than
+// starting over.
+type GCRun struct {
+	// ID identifies the run. It comes from the caller for the reason upload
+	// identifiers do: the row and the work it describes are started together.
+	ID string
+
+	// StartedAt is when the sweep began, on the caller's clock.
+	StartedAt time.Time
+
+	// FinishedAt is when it ended. The zero value means it is still running --
+	// or that the process died holding it, which is the same thing to the run
+	// that resumes it.
+	FinishedAt time.Time
+
+	// SweepBefore is the grace deadline the run started with: only blobs
+	// created before it may be swept (ADR 0010).
+	//
+	// It is stored rather than recomputed on resume. Recomputing would move
+	// the window forward and admit blobs that were protected when the run
+	// began, so an interruption would quietly widen what a sweep may delete --
+	// precisely backwards for the one operation that cannot be undone.
+	SweepBefore time.Time
+
+	// Cursor is the last digest the sweep considered, in digest order. Empty
+	// means it has not started. A resumed sweep continues after it, which is
+	// why both engines collate this column the same way.
+	Cursor Digest
+
+	// Scanned and Deleted count what the sweep considered and what it removed.
+	// They differ whenever a candidate stopped being one between the listing
+	// and the delete -- the re-check doing its job, which is a number worth
+	// seeing rather than hiding.
+	Scanned int64
+	Deleted int64
+
+	// FreedBytes is what the deleted blobs occupied.
+	FreedBytes int64
+
+	// Failure is why the run stopped, empty when it completed. It is a string
+	// rather than an error because it is read back from storage, where an
+	// error's identity does not survive.
+	Failure string
+}
+
 // CachedManifest is a manifest fetched from an upstream and kept, stored in the
 // cached-content family (ADR 0006) that no hosted code path can reach.
 //

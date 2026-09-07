@@ -96,3 +96,47 @@ Every failure mode degrades to *leak*, reclaimed by a later sweep or surfaced by
   precision bound.
 - The evaluator's purity makes P-002's property tests straightforward: rule
   priority total order, protection dominance, plan determinism.
+
+## Clarification (P-007, 2026-09-07): the mark is a predicate, not a snapshot
+
+The decision above describes computing a mark set "from a single
+transaction-consistent read" and bounding that snapshot's age on resume: an
+interrupted sweep may only continue if its mark is younger than the grace
+window, and must otherwise re-mark. That is the right rule for a *materialised*
+mark set, and it is what a traversal-based collector needs.
+
+P-007 does not materialise one. `manifest_refs` already flattens every
+manifest's edges, and a blob is referenced only as a `config` or a `layer` —
+`child-manifest` and `subject` edges name manifests, whose payloads live in
+their own rows rather than in the blob store. Reachability for the blob store
+is therefore a predicate over one table, not a graph walk, and it is evaluated
+**inside the candidate query and again inside the delete transaction**:
+
+```sql
+NOT EXISTS (SELECT 1 FROM manifest_refs
+            WHERE child_digest = blobs.digest AND kind IN ('config','layer'))
+```
+
+Three consequences, all in the safe direction:
+
+- **There is no stale set to age out.** Every answer is computed at the moment
+  it is used, so the snapshot-age rule has nothing to govern. A resumed sweep
+  needs no rule beyond "carry on from the cursor", and `gc_runs` stores no mark.
+- **Resume is strictly safer than the ADR's version**, not merely simpler: a
+  sweep that ran for a week would, under a snapshot, be acting on week-old
+  reachability until it re-marked. Here a manifest pushed a second ago protects
+  its blobs on the very next candidate query.
+- **The grace deadline is still a snapshot, and deliberately so.** `sweep_before`
+  is stored on the run and reused on resume rather than recomputed, because
+  recomputing would move the window forward and admit blobs that were protected
+  when the run began. An interruption must never widen what a sweep may delete.
+
+The safety argument is unchanged in substance — unreferenced at listing time,
+unreferenced again inside the delete transaction, older than the grace window,
+not pinned by an upload session — and one clause of it is now stronger, since
+"unreferenced at mark time" has become "unreferenced at listing time, moments
+ago" rather than "when the snapshot was taken, possibly long ago".
+
+What this does not change: the delete order (row first, bytes second), the
+`FOR UPDATE` lock on Postgres, the per-blob re-check, or the rule that every
+failure mode degrades to a leak.

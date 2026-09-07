@@ -18,3 +18,68 @@ task, in board order.
 
 **Reconcile notes.** The agent's proposed archtest rule was corrected before landing: it listed stdlib I/O packages under `Transitive`, which no package can satisfy since `fmt` reaches `os`. The rule now covers state-reaching packages only, and its `Reason` explains why the stdlib half lives in the purity test — which also lets P-005's apply path live in this package later without weakening either check. Seven decisions the agent flagged were confirmed: priority direction, name-based tie-break, protection not consuming a keep-last-N slot (protection keeps more, never fewer), an index child freed by the same plan staying excluded until the next evaluation (keeping plans independent of apply order), strictly-after boundary semantics, and zero-value safety on every enum. **For P-004**: the plan-staleness hash should cover the *inventory snapshot*, not the plan output — hashing the plan alone would accept an apply after a new push that made the plan wrong. That is P-004's decision to make, and the reasoning is recorded here so it is not rediscovered.
 
+
+## P-007 (part 1) — what the sweep may ask the store
+
+P-007 splits into two commits the way C-013 did, because the halves are
+independently reviewable: this one is what the metadata store can answer about
+reclaimable blobs, and the collector in `internal/gc` follows. Nothing here
+deletes anything on a schedule; what it adds is the ability to ask, and one
+method that deletes exactly one row under conditions it re-checks itself.
+
+**The mark turned out to be a predicate rather than a snapshot**, which is the
+one place this diverges from ADR 0010 and is recorded there as a clarification.
+`manifest_refs` already flattens every manifest's edges, and a blob is
+referenced only as a `config` or a `layer` — `child-manifest` and `subject`
+edges name manifests, whose payloads live in their own rows. So reachability
+for the blob store is a `NOT EXISTS` over one table, evaluated inside the
+candidate query and again inside the delete. There is no mark set to age out,
+`gc_runs` stores none, and a resumed sweep needs no rule beyond "carry on from
+the cursor" — which is strictly safer than the ADR's version, since a sweep
+running for a week acts on reachability computed a moment ago rather than a
+week ago.
+
+**`sweep_before` is a snapshot, and deliberately the other way.** The grace
+deadline is stored on the run and reused on resume rather than recomputed:
+recomputing would move the window forward and admit blobs that were protected
+when the run began, so an interruption would quietly widen what a sweep may
+delete. For the one operation that cannot be undone, that is the wrong
+direction to drift.
+
+**One WHERE clause, two callers.** `ListSweepCandidates` and
+`DeleteBlobIfUnreferenced` share the sweep conditions as a single constant
+(SQLite) or a single builder (Postgres, whose placeholders are numbered).
+Drift between them is the worst bug this file could have: a listing that
+offered what the re-check was meant to protect, or a re-check that refused
+everything and stopped the sweep reclaiming while looking healthy.
+
+**Postgres takes the lock the ADR asks for.** `SELECT … FOR UPDATE` on the blob
+row before the conditional delete, so a concurrent manifest PUT's existence
+check either lands before it — and the re-check sees the reference — or waits
+and then fails its own check, which is a re-upload and spec-legal. SQLite's
+single writer gives the same guarantee for free; there it is a single
+conditional `DELETE`, because there is no "between" for a reference to appear
+in.
+
+**A candidate that stopped being one is `(false, nil)`, not an error.** The
+re-check refusing is the system working, and a sweep that logged an error every
+time somebody pushed would teach an operator to ignore it.
+
+Migration 0011 adds `gc_runs` and two indexes the sweep needs: `manifest_refs
+(child_digest, kind)`, because the existing index leads with `repo_name` and
+the sweep's question is global (blobs are), and `upload_sessions (digest)`,
+because a pin is looked up by digest rather than by session. Both are added now
+rather than when the tables are large — the lesson C-004 recorded about
+`last_access_at`.
+
+Nine contract cases run against all three engines: referenced blobs are never
+offered and become collectable the moment their manifest goes, the grace window
+and the upload pin each protect independently, the listing pages by digest with
+an exclusive cursor, child-manifest edges protect nothing in the blob store,
+the delete re-checks references *and* the deadline, and a run's lifecycle,
+resume order, and refusals behave the same everywhere.
+
+**Still to come in P-007:** `internal/gc` — the collector that pages candidates,
+deletes rows then bytes, persists the cursor, emits `gc.completed`, and takes
+`blob.HostedRef` (the newtype C-013 introduced with its cached twin). P-008's
+race matrix follows it.
