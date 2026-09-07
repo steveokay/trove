@@ -282,55 +282,31 @@ func (m *Manifests) verifyReferences(w http.ResponseWriter, r *http.Request, nam
 // (ADR 0007).
 func (m *Manifests) resolve(w http.ResponseWriter, r *http.Request, name string) (meta.Manifest, bool) {
 	reference := server.OCIValue(r, "reference")
-	var digest meta.Digest
-	if isDigestReference(reference) {
-		parsed, ok := parsedDigest(w, reference)
-		if !ok {
-			return meta.Manifest{}, false
-		}
-		digest = meta.Digest(parsed)
-	} else {
-		if !tagPattern.MatchString(reference) {
-			// An illegal tag cannot name anything; it is unknown, not invalid,
-			// so probing with garbage looks like probing with a real name.
-			writeError(w, http.StatusNotFound, CodeManifestUnknown, "manifest unknown to registry")
-			return meta.Manifest{}, false
-		}
-		tag, err := m.Meta.GetTag(r.Context(), name, reference)
-		switch {
-		case errors.Is(err, meta.ErrNotFound):
-			writeError(w, http.StatusNotFound, CodeManifestUnknown, "manifest unknown to registry")
-			return meta.Manifest{}, false
-		case err != nil:
-			server.Logger(r.Context(), m.Log).Error("resolve tag", "repo", name, "tag", reference, "error", err)
-			writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
-			return meta.Manifest{}, false
-		}
-		digest = tag.Digest
-	}
 
-	record, err := m.Meta.GetManifest(r.Context(), name, digest)
+	record, err := resolveHostedManifest(r.Context(), m.Meta, name, reference)
 	switch {
-	case errors.Is(err, meta.ErrNotFound) && isDigestReference(reference):
+	case err == nil:
+		return record, true
+	case errors.Is(err, errUnparseableDigest):
+		// A digest-shaped reference that is not a digest is a client error,
+		// and saying so discloses nothing: no registry could hold that name.
+		writeError(w, http.StatusBadRequest, CodeDigestInvalid, err.Error())
+		return meta.Manifest{}, false
+	case errors.Is(err, ErrContentUnknown):
+		// An unknown tag, an unknown digest, and a tag that could not be one
+		// are a single answer: probing with garbage looks exactly like probing
+		// with a plausible name (ADR 0003).
 		writeError(w, http.StatusNotFound, CodeManifestUnknown, "manifest unknown to registry")
 		return meta.Manifest{}, false
-	case err != nil:
-		// A tag pointing at a missing manifest is drift, never "unknown": the
-		// store guarantees the edge, so a miss here means the data is wrong
-		// (P-012's scrub finds these; serving a lie would not).
-		server.Logger(r.Context(), m.Log).Error("read manifest", "repo", name, "digest", digest, "error", err)
+	default:
+		// Drift, or a store that would not answer. Never "unknown": the store
+		// promised this row, so a miss here means the data is wrong and
+		// serving a lie would not help (P-012's scrub finds these).
+		server.Logger(r.Context(), m.Log).Error("resolve manifest",
+			"repo", name, "reference", reference, "error", err)
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
 		return meta.Manifest{}, false
 	}
-
-	stored, err := blob.ParseDigest(string(record.Digest))
-	if err != nil || blob.FromBytes(stored.Algorithm(), record.Payload) != stored {
-		server.Logger(r.Context(), m.Log).Error("manifest payload does not match its digest",
-			"repo", name, "digest", record.Digest)
-		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
-		return meta.Manifest{}, false
-	}
-	return record, true
 }
 
 func manifestHeaders(w http.ResponseWriter, record meta.Manifest) {

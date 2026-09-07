@@ -895,3 +895,60 @@ serve. `proxyserve.Clients` is the seam the wiring implements — building a
 client means decrypting a credential (C-003), applying the entity's trusted
 hosts (C-014), and sharing a rate-limit standing across every request to that
 upstream (C-009), all of which have a lifetime this package should not own.
+
+## C-019 — group pulls over `/v2/`
+
+`internal/groupserve` owns almost no logic, which is the point. Ordering and
+first-match-wins are `repo.Resolve` (C-011, pure and exhaustively table-tested);
+permission filtering is `repo.VisibleMembers` (C-012); asking a member is the
+same `ContentServer` interface the dispatcher uses, so a hosted member and a
+proxy member are asked the same question. What is left is sequencing and one
+rule that cannot be delegated: **members the subject cannot read are removed
+before resolution runs, not skipped**. A skipped member becomes an event naming
+it, so filtering by skipping would disclose through the event stream exactly
+what the listing hid. A test compares two whole resolutions -- a group with a
+hidden first member that *would* have served, and a group that never had it --
+and requires them to be identical in served digest and in events.
+
+**Asking flows through the filtered set, never beside it.** `MemberSet.Members()`
+gives the members to ask and `MemberSet.With(outcomes)` puts the answers back,
+so `Resolve` is handed the same filtered value the filter produced. Rebuilding
+a list alongside it would have worked and would have removed the type-level
+guarantee C-012 exists to provide.
+
+**The hosted adapter, and the rewiring that did not happen.** A group member can
+be hosted or proxy, so hosted content needed a `ContentServer` too --
+`registry.HostedContent`. The obvious next step was to route the handlers' own
+hosted reads through it, and the cost showed itself immediately: a hosted blob
+HEAD answers today from the metadata row alone, and asking it through
+`ContentServer.Blob` would open the file on every existence check, which is
+what `docker push` does for every layer it might mount. The seam is right for a
+group member, which must *produce* content to prove it has it, and wrong for an
+existence check that already has a cheaper answer. What is shared instead is
+`resolveHostedManifest` -- one reader of a hosted manifest, used by the handler
+with an HTTP error mapping and by the adapter with a sentinel one. Two mappings
+of one read.
+
+That extraction found a regression on its way in: a malformed digest
+(`sha256:short`) used to answer **400 DIGEST_INVALID** and my first version made
+it a 404. The test caught it, and the distinction is now explicit -- a
+digest-shaped reference that is not a digest is a client error and saying so
+discloses nothing, because no registry could hold that name.
+
+**A member whose row cannot be read fails the whole resolution.** This was the
+design error the tests surfaced. The first version marked such a member "down"
+and carried on, which reads as robustness and is not: an operator who put an
+internal registry first is relying on it being asked *first*, and quietly
+resolving around an unreadable member could serve a different image than the
+ordering says. Stale configuration is loud here.
+
+Three defences remain that a stored configuration cannot reach -- a member type
+nothing serves, a nested group, a member list that cannot be ordered. The store
+refuses all three, `Resolve` refuses two of them again, and this package
+refuses them a third time. They are tested at the unit level, which is the only
+level they exist at.
+
+**Still to come:** C-020 constructs all of this in serve. Until then the group
+server exists and nothing builds one, so a group pull still answers as an
+unwired delegate does: 404, indistinguishable from a repository that is not
+there.

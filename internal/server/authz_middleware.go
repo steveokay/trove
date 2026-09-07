@@ -125,6 +125,17 @@ const (
 	visibilityKey
 )
 
+// ContextWithSubject carries a subject the way a guarded route does.
+//
+// The guard is what puts one there in production, and this is how anything
+// that serves *behind* the guard -- group resolution, which must know who is
+// asking before it filters members (C-019) -- can be exercised without
+// standing up a router. It is exported alongside SubjectFrom rather than
+// duplicated in a test helper so there is one key and one shape.
+func ContextWithSubject(ctx context.Context, subject authn.Subject) context.Context {
+	return context.WithValue(ctx, subjectKey, subject)
+}
+
 // SubjectFrom returns the subject a guarded handler is serving. The second
 // result is false outside a guarded route.
 func SubjectFrom(ctx context.Context) (authn.Subject, bool) {
