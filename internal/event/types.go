@@ -231,8 +231,13 @@ type CacheEvictedPayload struct {
 	Repository string `json:"repository"`
 	Digest     string `json:"digest"`
 	Size       int64  `json:"size"`
-	// Reason says which sweep took it: "budget" for the LRU bound, "ttl" for
-	// expiry, "manual" for an operator.
+	// Reason says which sweep took it: "budget" for the LRU bound, "orphan"
+	// for bytes no proxy held a row for, "ttl" for expiry, "manual" for an
+	// operator.
+	//
+	// An orphan has no repository -- nothing had a claim on it, which is what
+	// made it collectable -- so that field is empty for, and only for, that
+	// reason.
 	Reason string `json:"reason"`
 }
 

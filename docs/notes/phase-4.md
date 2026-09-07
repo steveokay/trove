@@ -493,3 +493,113 @@ reporting the last real error rather than a bare deadline. `New` performs a
 bucket check, so it is the readiness probe as well as the thing under test:
 this is a wait for a service that is starting, not a retry of a flaky assertion
 (§9 draws that line, and only the second kind is forbidden).
+
+## C-013 (part 2) — the evictor, the orphan pass, and ADR 0009's proof
+
+The second half: `internal/cache` acts on what part 1 taught the tables to
+answer. Four pieces and a proof.
+
+**The budget sweep** (`Evictor.Sweep`) enforces the per-proxy carve-outs first
+and the global budget last. The order is the decision worth arguing about: a
+proxy over its own ceiling should pay for its own excess before everything is
+ranked together, because a global-first pass would let one greedy upstream's
+fills evict a well-behaved proxy's content while the greedy one stayed over the
+limit its operator set. Carve-outs are ceilings and not allocations — an entity
+inside its own budget can still lose content to the global pass, because the
+disk is finite whatever the per-proxy configuration says.
+
+A sweep goes *under* the budget by a headroom fraction (5% by default) rather
+than stopping at the line, or the next byte cached would trigger the next
+sweep. Usage is decremented as rows go rather than re-queried per iteration: a
+concurrent fill is a difference the next sweep sees, not one worth a query per
+row. Two guards keep a broken store from becoming a spin — an empty listing
+ends the pass, and a whole page from which nothing could be evicted ends it
+too, since the next listing would return the same rows in the same order for
+the same failures.
+
+**A blob's bytes are reclaimed only when its last claim goes.** `DeleteCachedBlob`
+returns the claims that remain, in the same transaction as the delete, so
+nothing can take a claim in between; the sweep reclaims the bytes only on zero
+and counts the rest as `Shared`, which is the gap between what the budget
+reclaimed and what the disk gave back. A byte delete that fails is *not* a
+sweep failure: the row is gone, the accounting is right, and the bytes are an
+orphan the next orphan pass collects.
+
+**The orphan pass** (`Evictor.SweepOrphans`) collects cache bytes no proxy has a
+row for. They exist by design — C-004's fill commits bytes before it writes the
+row, because a row without bytes is a miss the read path already handles while
+bytes without a row cost only space. The walk collects and then deletes rather
+than deleting inside the callback, because no driver offers a contract for
+being mutated mid-enumeration. One race is accepted knowingly and documented at
+the function: a fill that commits between the claims query and the delete loses
+its bytes, which is a miss and a refill on the path built to survive exactly
+that. A claims query that *fails* keeps everything — "I do not know" reads as
+"do not delete".
+
+**The touch batcher** feeds `TouchCached` from the serving path in the shape
+R-010 established for pull statistics: a buffered channel, one aggregating
+goroutine, and drops rather than blocking a pull. The LRU key is a maximum
+rather than a sum, which is the one difference from the pull batcher's
+arithmetic. It grew a `Flush` the pull batcher does not have, because eviction
+ranks on the times in the store: a sweep that ran with a minute of accesses
+still queued would rank content served seconds ago as the coldest thing in the
+cache. The Scheduler flushes before every sweep, which narrows that window to
+the flush itself rather than pretending to close it. The interval flush drains
+the queue first for the same reason — an access that arrived before the tick
+should not wait for the tick after it.
+
+**The Scheduler** runs sweeps on a timer and on a breach trigger, one at a time
+in one goroutine. Triggers coalesce through a depth-one channel: a hundred
+fills during one sweep leave exactly one sweep pending, because a trigger means
+"the cache grew" and a sweep that has not started yet will see all of it. The
+orphan pass is pinned to every Nth sweep rather than to a second timer, so
+there is one schedule to reason about instead of two that drift. A failed sweep
+never stops the loop — the store that is not answering resolves without this
+goroutine's help, and a cache that stopped evicting at the first hiccup would
+fill up silently — and a cancelled one is logged at nothing at all, because a
+message printed on every shutdown teaches operators to ignore the one that
+matters.
+
+**Wall 1's blob-side newtypes landed here**, as ADR 0009's C-004 clarification
+said they would: `blob.CachedRef` and `blob.HostedRef` are structs wrapping a
+validated digest, so `CachedRef(hosted)` does not exist as a conversion and
+crossing requires naming the digest and building the other ref — a visible,
+greppable act. `internal/cache`'s `reclaim` is the only function in trove that
+deletes from the cache blob store and it takes a `CachedRef`; `internal/gc`'s
+sweep (P-007) is the other half and takes the `HostedRef`. A newtype nothing
+consumes would have been a convention, which is why they waited for a deleting
+caller.
+
+**The proving test is `test/separation`**, and it is in the top-level test tree
+for a structural reason: wall 3 forbids `internal/cache` and `internal/policy`
+from importing each other, so no package the wall constrains can host the test
+that checks it. One fixture holds hosted and cached content **with the same
+digests** — a proof that eviction took the right rows is worth nothing if the
+two families are distinguishable by digest alone — and three tests discharge
+the ADR's four assertions: the evictor is constructed with only the cached
+store and the cache-rooted blob store over roots proven disjoint (a), the two
+named import rules still exist in `archtest.Rules()` and still pass (b), a
+retention plan built over the same fixture reaches only hosted rows (c), and an
+eviction pass over it calls only cached-family methods and deletes only through
+the cache store, observed via recording fakes (d). Assertion (a) is the wiring
+in the form available today; when `internal/server` gains the `/v2/` proxy
+wiring it will be the place that constructs both, and the assertion moves to
+where the disjoint instances are actually chosen.
+
+**Not wired into serve.** The evictor, the scheduler, and the touch batcher are
+constructed by whoever wires the serving path, and that task also decides where
+the per-proxy carve-out comes from: `cache.budget` exists in configuration
+today, `repo.ProxyConfig` has no per-proxy budget field yet, and adding one
+belongs with the wiring that would read it rather than ahead of it. The evictor
+takes carve-outs as values for the same reason the Filler takes a Target.
+
+### Verification
+
+Full gate green locally with the testcontainer suites running (postgres,
+MinIO, `registry:2`): coverage **96.4%** against the 95.0% threshold,
+`go test ./... -race` clean, `golangci-lint run ./...` and `gofmt -l` clean.
+`internal/cache` itself is at 100% line coverage. Two flakes introduced during
+the work were fixed at the source rather than retried (§9): the interval flush
+could leave an access sitting in the queue when the tick arrived first, which
+is now a drain before the flush, and a scheduler test stopped its own loop
+twice.

@@ -148,10 +148,41 @@ built from.
 > object store's integrity guarantees instead of trove's. It is faster and it
 > is a deliberate trade.
 
+## Cache eviction
+
+`cache.budget` (50 GB by default) is what proxy-cached content may occupy. When
+the cache is over it, the coldest content is reclaimed until it is back under —
+plus a little more, so the next pull does not immediately trigger another sweep.
+
+What that means in practice:
+
+- **Manifests and blobs are ranked together**, oldest last-access first. They
+  compete for one budget, so the coldest thing goes whichever kind it is.
+- **The budget counts rows, not disk.** Two proxies that cached the same layer
+  hold one copy of the bytes and one row each; evicting one proxy's row does
+  not remove bytes the other can still serve. The bytes go with the last claim.
+- **A budget of `0` means unlimited.** A cache nobody bounded grows, which is
+  visible in the storage metrics — it does not quietly empty itself because a
+  key was missing.
+- **Nothing here can reach hosted content.** Eviction runs over the cached
+  tables and the cache-rooted blob store only, and it reports `cache.evicted`
+  rather than `artifact.deleted`, so "was this recoverable?" is answerable from
+  the event type alone (ADR 0009). Everything eviction removes can be fetched
+  again from the upstream.
+- **A separate orphan pass** reclaims cache bytes no proxy has a row for. Those
+  come from fills interrupted between writing the bytes and writing the row —
+  cheap to leave lying around, and never content anything could have served.
+
+Last-access times are written in batches rather than on every pull, so the
+ordering is accurate to within a flush interval. The cost of getting it wrong
+is one refill of content that is refillable by definition, which is why the
+pull path is never made to wait for it.
+
 ## Notable defaults, and why
 
 | Setting | Default | Reason |
 |---|---|---|
+| `cache.budget` | `50GB` | What cached proxy content may occupy before the least-recently-used of it is reclaimed. Hosted content is accounted for separately and is never reclaimed by this. |
 | `cache.tag_ttl` | `15m` | Tags move; digests do not. This bounds how long a stale `:latest` can be served before revalidation. |
 | `cache.offline_mode` | `serve-stale` | An unreachable upstream should not stop a cluster from pulling images it already has. |
 | `policy.gating_enabled` | `false` | Observe before blocking. A fresh install with an empty CVE database would otherwise refuse everything. |
