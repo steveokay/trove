@@ -598,7 +598,8 @@ takes carve-outs as values for the same reason the Filler takes a Target.
 Full gate green locally with the testcontainer suites running (postgres,
 MinIO, `registry:2`): coverage **96.4%** against the 95.0% threshold,
 `go test ./... -race` clean, `golangci-lint run ./...` and `gofmt -l` clean.
-`internal/cache` itself is at 100% line coverage. Two flakes introduced during
+`internal/cache` itself is at 100% line coverage. CI green on 722cd1e
+(run 34126240796): every job, conformance included. Two flakes introduced during
 the work were fixed at the source rather than retried (§9): the interval flush
 could leave an access sitting in the queue when the tick arrived first, which
 is now a drain before the flush, and a scheduler test stopped its own loop
