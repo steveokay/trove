@@ -673,3 +673,66 @@ Full gate green with the testcontainer suites up: coverage 96.4% against the
 95.0% threshold, `-race` clean, lint and gofmt clean, with `internal/hostpattern`
 and the preset accessors at 100%. CI green on 8fdc7db (run 34127467142): every
 job, conformance included.
+
+## C-015 — Proxy adversarial suite
+
+`test/proxyadv` drives the **composed** pipeline — a real client over a real
+filler over a real metadata and blob store — against an upstream that is not
+merely unavailable but actively wrong. That composition is the point: each of
+these failures is caught by one layer, and what matters is what the layers
+above it do with the catch. A digest mismatch is the client's to notice; the
+suite's assertion is that nothing was cached, nothing was served, and the
+operator was told.
+
+**Seventeen scenarios, and a ratchet that keeps them.** The cases live in a
+table with a stable id and the requirement each discharges written out in
+words, and `requiredScenarios` lists the ids §9 and the C-015 plan demand.
+Deleting a case is therefore two edits, the second of which is the question
+"are we still defending this?" asked out loud. Adding one needs no edit —
+more adversarial coverage is always welcome.
+
+**The hostile upstream is one interceptor hook, not a fault enum.** Every
+scenario is "what if the upstream did *this*", so each says so in its own terms
+instead of adding a flag to a growing switch. With no interceptor installed the
+upstream serves the `clienttest` fixture correctly, which is the positive
+control every negative case rests on.
+
+**Named hosts, because the redirect rules are different rules.** Every httptest
+server listens on loopback, and the policy refuses a private address *before*
+it consults the trusted-host list — so a suite that pointed its upstream at
+127.0.0.1 could not tell "refused because untrusted" from "refused because
+private", and a bug in either rule would pass as the other. A `hostRouter`
+transport maps `registry.example`, `cdn.example`, and `cdn.evil` onto real test
+servers; unmapped hosts are dialled for real, which is what makes the SSRF case
+honest. Its redirect points at a **live loopback listener**, and the assertion
+is that nothing ever arrived on it — not merely that the pull failed. The
+trusted-host half is the other side of the same coin: with `cdn.example` in
+`TrustedHosts` (C-014's field) the redirect *is* followed and the layer caches,
+so the refusals are the policy's judgement rather than a harness that cannot
+follow a redirect at all.
+
+**The realm gets the same treatment as a Location header.** A `WWW-Authenticate`
+realm is where the client is about to send the upstream's password, so the
+scenario hands it a private address with real credentials configured and
+requires the listener to stay silent.
+
+**What the traversal cases can prove today.** Hostile upstream repository paths
+are refused as *names* — the test asserts a `*proxy.ReferenceError`, not just
+some error, because a path that failed incidentally would leave the next
+hostile name to chance — and nothing reaches the wire. The remainder half
+drives `repo.Split` and `RoutingRules.Evaluate`, the two gates that exist; the
+namespace rewrite belongs to the `/v2/` wiring that does not exist yet, and
+when it lands it goes between them and this scenario grows a third assertion.
+That is written into the test rather than left as a gap somebody has to notice.
+
+**Harness self-tests**, because a negative assertion is worthless if its
+machinery could not observe the thing happening: the upstream serves the
+fixture when it behaves, the loopback listener is shown recording a request,
+and the host router is shown deciding where requests go (a host mapped to a
+dead port fails rather than reaching the fixture by accident).
+
+Two cases are deliberately about *not* backing off forever: the 429 storm
+asserts the upstream is not called at all while the backoff stands and *is*
+called again once the window passes, and the stale-tag pair asserts serve-stale
+answers from the lease with `Stale` set and an event, while strict refuses and
+publishes nothing.
