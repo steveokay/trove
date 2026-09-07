@@ -149,3 +149,71 @@ Full gate green with the testcontainer suites up: coverage 96.1% against the
 95.0% threshold, `-race` clean, lint and gofmt clean, `internal/gc` at 100%.
 CI green on both commits — 34153141884 for the store layer, 34153682877 for
 the collector, every job including conformance.
+
+## P-008 — the GC race matrix
+
+Two halves, and they answer different questions.
+
+**`internal/gc/race_test.go` places a push at an exact point in a sweep.** The
+sync points are the collector's own store calls — "list candidates", "delete
+this one if it is still collectable", "save progress" — so a stub that acts
+*inside* one of them puts a concurrent operation at a precise moment without a
+hook in production code that exists only for tests, and without a sleep. The
+plan suggested injected sync-points in the sweep loop; the store boundary
+already is one, and using it kept the collector free of test scaffolding.
+
+The cells:
+
+- **GC loses to a manifest pushed mid-sweep.** The blob is listed as
+  collectable, a manifest PUT references it before the delete transaction
+  opens, and the blob survives whole. This is ADR 0010's central claim, placed
+  exactly where the claim is made.
+- **GC loses to an upload started mid-sweep** — the same race one step earlier
+  in a push, where only the session pin protects the blob.
+- **GC survives a manifest deleted mid-sweep.** Blobs become collectable after
+  the listing that would have offered them; the sweep neither fails nor deletes
+  them on the strength of a stale listing, and the next pass takes them. GC is
+  eventually complete, not exactly complete.
+- **The grace boundary belongs to the side that keeps data.** A blob created
+  *at* the deadline is protected; one a nanosecond earlier is not. The
+  condition is strictly "older than", and the test pins which side of the
+  comparison the boundary falls on.
+- **Interrupt at every phase boundary** — before the first listing, holding a
+  page, between two deletes, after a page's progress is written — each
+  asserting the same two things: nothing referenced is lost, and the sweep
+  resumes to completion.
+
+That last case found a real over-specification in the first draft of the test:
+cancelling *inside* a store call makes that candidate's re-check error, so it
+is counted as skipped and the cursor still advances past it. It must advance,
+or a permanently failing blob would make the sweep loop on it forever — so a
+resumed run may leave one behind, and the next *fresh* sweep collects it. The
+test now asserts that, which is what the design actually promises.
+
+**`test/gcrace` lets nobody choose the interleaving.** Eight clients push
+complete images — session, bytes, blob row, session released, then the manifest,
+in the registry's own order — against a collector sweeping continuously over
+the real SQLite store and a real filesystem blob store, with a 250 ms grace
+window so the sweep genuinely reaches the content. The assertion is the
+invariant rather than a sequence: *every blob a live manifest references still
+has its row and its bytes*. Two guards keep it honest — unreferenced blobs must
+actually have been collected, and the collector must have deleted something
+**while the pushes were still running**, measured by counting deletes at the
+moment the clients finish. Counting completed sweeps was the first attempt and
+was too coarse: a full pass takes longer than the pushes do.
+
+**The concurrent suite found a production bug the deterministic one could not.**
+SQLite reports a cancelled context as its own `interrupted (9)` rather than as
+`context.Canceled`, so a shutdown mid-sweep surfaced as "a sweep failed". The
+collector now classifies by what was asked rather than by what the driver
+called it: if the context is done, a store failure is an interruption, the run
+stays open, and the caller gets `context.Canceled`. Without that, P-006's
+scheduler would log a failed collection on every shutdown — the exact noise
+that teaches an operator to ignore the message that matters. A table test now
+pins it across all three points a sweep can be cancelled at.
+
+**Deviation from the plan, stated:** the chaos variant runs in the normal suite,
+bounded to a couple of seconds, rather than as a nightly job. There is no
+nightly workflow in this repository, and a chaos test nobody watches nightly is
+worth less than a bounded one that runs on every commit — with the bound being
+what keeps it from becoming the flaky test §9 forbids.

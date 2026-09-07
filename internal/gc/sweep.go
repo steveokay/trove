@@ -218,6 +218,14 @@ func (c *Collector) Run(ctx context.Context) (Result, error) {
 		}
 
 		candidates, err := c.meta.ListSweepCandidates(ctx, run.SweepBefore, cursor, c.batch)
+		if err != nil && ctx.Err() != nil {
+			// Asked to stop, so this is a stop. A store does not necessarily
+			// report cancellation as context.Canceled -- SQLite surfaces its
+			// own "interrupted" -- and a caller that logged every shutdown as
+			// a garbage-collection failure would be teaching its operator to
+			// ignore the message that matters.
+			return c.interrupted(ctx, run.ID, cursor, result, ctx.Err())
+		}
 		if err != nil {
 			// A sweep that cannot see its candidates has failed rather than
 			// been interrupted, and the difference is worth keeping: the run
@@ -281,7 +289,11 @@ func (c *Collector) begin(ctx context.Context) (meta.GCRun, bool, error) {
 		c.log.InfoContext(ctx, "resuming an interrupted garbage collection",
 			"run", existing.ID, "cursor", string(existing.Cursor), "sweep_before", existing.SweepBefore)
 		return existing, true, nil
-	case !errors.Is(err, meta.ErrNotFound):
+	case errors.Is(err, meta.ErrNotFound):
+		// Nothing to resume: start one below.
+	case ctx.Err() != nil:
+		return meta.GCRun{}, false, ctx.Err()
+	default:
 		return meta.GCRun{}, false, fmt.Errorf("look for a run to resume: %w", err)
 	}
 
@@ -292,6 +304,11 @@ func (c *Collector) begin(ctx context.Context) (meta.GCRun, bool, error) {
 		SweepBefore: now.Add(-c.grace),
 	}
 	if err := c.meta.StartGCRun(ctx, run); err != nil {
+		// Cancellation is reported as cancellation whatever the store called
+		// it, so a shutdown never reads as a failed collection.
+		if ctx.Err() != nil {
+			return meta.GCRun{}, false, ctx.Err()
+		}
 		return meta.GCRun{}, false, fmt.Errorf("start a run: %w", err)
 	}
 	return run, false, nil
