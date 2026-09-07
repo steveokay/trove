@@ -217,3 +217,10 @@ bounded to a couple of seconds, rather than as a nightly job. There is no
 nightly workflow in this repository, and a chaos test nobody watches nightly is
 worth less than a bounded one that runs on every commit — with the bound being
 what keeps it from becoming the flaky test §9 forbids.
+
+### Verification (P-008)
+
+Full gate green with the testcontainer suites up: coverage 96.1% against the
+95.0% threshold, `-race` clean (both suites run repeatedly to check for
+flakes), lint and gofmt clean, `internal/gc` still at 100%. CI green on
+a0eb61c (run 34154358304), every job including conformance.
