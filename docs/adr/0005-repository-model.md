@@ -94,3 +94,28 @@ resolution must be a pure, permission-filtered function (§4).
   groups enumerate the union of readable members' listings.
 - Binding scopes naturally express entity-level grants (`all/*`) and sub-tree
   grants (`all/library/*`) with no new mechanism.
+
+## Clarification (C-021, 2026-09-07): what a group lists
+
+A group lists the **union of what its readable members contribute**,
+deduplicated, with member order breaking ties exactly as resolution does.
+
+Filtering comes first and is the filtering C-012 already built: members the
+subject cannot read are *removed* from the member list, and the union is taken
+over what remains. A subject must not be able to infer a member's existence
+from a listing any more than from a pull (§4).
+
+Ordering matters for tags because two members can hold the same tag pointing at
+different digests. The listing reports the digest the *first* member would
+serve, because a listing that disagreed with a pull would be worse than no
+listing: an operator would read it, pull it, and get something else.
+
+A member that fails is dropped from the union, logged, and emitted as an event
+— the same treatment a failing member gets during resolution, and for the same
+reason: one member being down must not take out the group endpoint. This is a
+deliberate difference from *resolution*, where a member whose row cannot be
+read fails the whole call (C-019): a resolution promises "this is the artifact
+you asked for" and must not quietly answer from a later member, while a listing
+promises only "this is what I can see right now". The difference is documented
+rather than smoothed over because it is the sort of asymmetry that looks like a
+bug later.

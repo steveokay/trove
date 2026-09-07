@@ -97,3 +97,50 @@ drives everything below.
   redirect loop (client caps redirects at 5, same-registry-family only — SSRF),
   429 storm, single-flight under concurrency, stale-past-TTL behaviour in both
   offline modes.
+
+## Clarification (C-021, 2026-09-07): what a proxy claims to contain
+
+C-004 and R-004 both left this open, and C-021 was blocked on it: a listing has
+to say *something* about a proxy, and every answer trades honesty against
+usefulness. Decided, with the reasoning, because the two listings get opposite
+answers and that looks inconsistent until you know why.
+
+**`/v2/_catalog` lists cached content only.** A proxy contributes the content
+names it actually holds; a proxy that has never served a pull contributes
+nothing. The catalog answers "what does this registry hold", and for a proxy
+that is exactly the cache.
+
+The alternative — asking the upstream — is close to unbuildable for the
+registries we ship presets for (C-014). Docker Hub, ghcr.io, and quay.io do not
+implement `/v2/_catalog` at all; it is optional in the distribution spec and
+effectively unimplemented by public registries, because publishing an
+enumeration of everything you host is not something a public registry wants to
+do. So "proxy the catalog" would return nothing for the five upstreams that
+matter, while adding an outbound request and a disclosure surface to a listing.
+
+**Tag lists are fetched from the upstream on demand, cached with a TTL.** The
+opposite answer, for a reason that is not inconsistency: every real registry
+implements `/v2/<name>/tags/list`, and it is the call that answers "what
+versions exist" for humans and for tooling. Serving cached tags only would
+report *one* tag for an image after one pull — not merely incomplete but
+actively misleading, since a client cannot tell a short list from a short
+history.
+
+The mechanism is the one this ADR already describes for tag resolution: the
+result is a lease with a TTL, revalidated on expiry, and an upstream that
+cannot be reached falls back to the cached list marked stale rather than
+failing (`strict` mode fails, as everywhere else). A 404 for the repository
+goes through the negative cache (C-007). Nothing new is invented here; a tag
+*list* is cached the same way a tag *mapping* is.
+
+**Referrers work over cached content**, fetched from the upstream and cached
+like anything else. §6 requires cached content to be scanned rather than
+silently exempt from gating, and ADR 0013's presence checks read signatures and
+attestations through the referrers API — so a referrers call that answered
+hosted-only would report a signed upstream image as unsigned, and a
+presence-based gate would then block it. Permission is unchanged: a subject who
+cannot read the subject artifact cannot read its referrers (§5.7).
+
+**All three stay permission-filtered at the query layer** (§0.5). Fetching from
+an upstream happens *after* the subject's visibility has been established, never
+as a way of discovering what to filter.

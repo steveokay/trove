@@ -231,12 +231,34 @@ C-015 last.
   assertion (a) moves onto the real wiring; `test/offline` still silent at boot.
 - **Test:** live serve pull; wiring disjointness; boot silence.
 
-## C-021 Catalog, tag list, and referrers for proxy and group
-- **Deps:** C-018, C-019 — **and a decision**
-- **Do:** nothing yet. What a proxy contributes to `/v2/_catalog` and to a tag
-  list is a product question: cached content only (honest, but a fresh proxy
-  reads as empty), proxied from the upstream on demand (what a client expects,
-  but it makes a listing an outbound request and a disclosure surface), or
-  nothing. The same question applies to a group's union and to referrers over
-  cached content. Every option is permission-filtered at the query layer (§0.5);
-  the choice is about what the registry claims to contain.
+## C-021 Catalog over cached content
+- **Deps:** C-020 — decision taken 2026-09-07 (ADR 0008 clarification).
+- **Do:** `/v2/_catalog` lists cached content only. Union the cached-manifest
+  content names into `meta.ListContentNames`, keeping the visibility filter
+  inside the query (§0.5) — unioning first and filtering after would leak
+  through pagination counts. A group contributes the union of its readable
+  members (`repo.VisibleMembers` first, then union, deduplicated).
+- **Test:** metatest pagination-under-filtering over the unioned query (a
+  cursor must never name a hidden row); disclosure suite's catalog surface
+  extended to cached and group content.
+
+## C-022 Tag lists for proxy and group
+- **Deps:** C-021, C-018, C-019 — decision taken 2026-09-07 (ADR 0008).
+- **Do:** fetch tag lists from the upstream on demand and cache with a TTL,
+  reusing C-005's lease shape, C-007's negative cache and C-008's degraded
+  mode (unreachable → last list served stale; `strict` fails). A group returns
+  the union of readable members' lists, deduplicated, member order breaking
+  ties so a listing cannot disagree with a pull. A failing member is dropped,
+  logged and evented — unlike resolution, where an unreadable member fails the
+  call (ADR 0005 records why).
+- **Test:** TTL expiry and revalidation; upstream down in both modes; two
+  members holding one tag; an unreadable member contributing nothing.
+
+## C-023 Referrers over cached content
+- **Deps:** C-021, C-022 — decision taken 2026-09-07 (ADR 0008).
+- **Do:** referrers are fetched and cached like any other content, so §6's
+  "cached content is scanned too" and ADR 0013's signature-presence gating both
+  work on proxied images. Permission is unchanged: no read on the subject
+  artifact means no read of its referrers (§5.7).
+- **Test:** referrers over a cached subject; disclosure suite's referrer
+  surface extended to cached content; a gate seeing an upstream signature.
