@@ -142,3 +142,10 @@ golden updated; no consumer exists yet (webhooks are E-002+), so the wire
 format was still free to be honest.
 
 Coverage: `internal/gc` 100%.
+
+### Verification (P-007)
+
+Full gate green with the testcontainer suites up: coverage 96.1% against the
+95.0% threshold, `-race` clean, lint and gofmt clean, `internal/gc` at 100%.
+CI green on both commits — 34153141884 for the store layer, 34153682877 for
+the collector, every job including conformance.
