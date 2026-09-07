@@ -181,3 +181,62 @@ C-015 last.
   verbs enforced with positive+negative tests (Z-005 registry).
 - **Test:** CRUD matrix per type; validation errors problem+json golden; authz
   matrix; config-history assertion.
+
+---
+
+## C-017 `/v2/` dispatch by repository type
+- **Deps:** C-001 ✓, R-001 ✓, R-002 ✓
+- **Files:** `internal/registry/dispatch.go`, read paths in `blobs.go`/`manifests.go`
+- **Do:** `routeToEntity` already returns the entity's record; the read helpers
+  discard its `Type`. Keep it, and branch: hosted unchanged, proxy and group
+  delegated to `ProxyServer`/`GroupServer` seams declared by the consumer. A nil
+  seam answers 404/`NAME_UNKNOWN`, byte-identical to an unknown repository, so a
+  deployment that has not wired proxying discloses nothing. Writes keep refusing
+  through `repo.Writable`.
+- **Accept:** hosted goldens unchanged; proxy/group reads reach the seam; the
+  unwired answer is indistinguishable from a missing repository.
+- **Test:** route matrix per type; hosted golden diff; disclosure parity.
+
+## C-018 Proxy pulls over `/v2/`
+- **Deps:** C-017, C-004 ✓, C-005 ✓, C-010 ✓
+- **Files:** `internal/registry/proxyserve.go`, namespace rewrite in `internal/repo`
+- **Do:** tag → `ResolveTag`; digest → `Manifest`/`Blob` with the stream going to
+  the client as it fills. Routing rules evaluate the rewritten upstream path;
+  the `DefaultNamespace` rewrite itself lands here (C-015 left the assertion
+  waiting). Cache hits feed the touch batcher. `Warning: 110` on stale content,
+  deferred by C-008 because it needs the HTTP path.
+- **Accept:** a pull through a fake upstream over HTTP, served and cached; push
+  refused `DENIED`; stale content marked.
+- **Test:** HTTP pull/stale/refusal matrix; the rewrite traversal assertion.
+
+## C-019 Group pulls over `/v2/`
+- **Deps:** C-017, C-011 ✓, C-012 ✓
+- **Files:** `internal/registry/groupserve.go`
+- **Do:** probe members in order to build `MemberState`, filtering by permission
+  *first*; first match wins; skip what cannot answer; fail only on a required
+  member; emit `group.member.skipped`.
+- **Accept:** the disclosure suite's group surface proven over HTTP; a filtered
+  member changes nothing observable.
+- **Test:** HTTP group matrix; C-012's differential assertions end to end.
+
+## C-020 Serve assembly for proxy and cache
+- **Deps:** C-018, C-019, C-013 ✓, C-003 ✓, C-014 ✓
+- **Files:** `internal/cli/serve.go`
+- **Do:** per-entity client with decrypted credentials, `TrustedHosts` and TTLs
+  from config, the cache-rooted blob store, the `Filler`, and C-013's `Evictor`
+  + `Scheduler` + `TouchBatcher` with a shutdown order. Wiring lives here and
+  nowhere else (ADR 0009 wall 2). Decides where a per-proxy cache carve-out is
+  configured from.
+- **Accept:** live `trove serve` pull through a fake upstream; ADR 0009 proving
+  assertion (a) moves onto the real wiring; `test/offline` still silent at boot.
+- **Test:** live serve pull; wiring disjointness; boot silence.
+
+## C-021 Catalog, tag list, and referrers for proxy and group
+- **Deps:** C-018, C-019 — **and a decision**
+- **Do:** nothing yet. What a proxy contributes to `/v2/_catalog` and to a tag
+  list is a product question: cached content only (honest, but a fresh proxy
+  reads as empty), proxied from the upstream on demand (what a client expects,
+  but it makes a listing an outbound request and a disclosure surface), or
+  nothing. The same question applies to a group's union and to referrers over
+  cached content. Every option is permission-filtered at the query layer (§0.5);
+  the choice is about what the registry claims to contain.
