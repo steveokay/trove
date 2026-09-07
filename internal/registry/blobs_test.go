@@ -48,8 +48,23 @@ type stack struct {
 	blobs  *blobmem.Store
 }
 
-func newStack(t *testing.T) stack {
+// stackOptions are the knobs a test file can turn on the shared fixture.
+type stackOptions struct {
+	// servers are the delegates for proxy and group repositories (C-017). The
+	// zero value wires none, which is what most of these tests want: a
+	// registry that serves hosted content and nothing else.
+	servers registry.ContentServers
+	// pulls receives pull observations (R-010). Nil records none.
+	pulls registry.PullRecorder
+}
+
+func newStack(t *testing.T, opts ...func(*stackOptions)) stack {
 	t.Helper()
+
+	var options stackOptions
+	for _, apply := range opts {
+		apply(&options)
+	}
 
 	ctx := context.Background()
 	metaDB := metamem.New()
@@ -68,6 +83,7 @@ func newStack(t *testing.T) stack {
 	for _, repo := range []meta.Repository{
 		{Name: "team-a", Type: meta.Hosted},
 		{Name: "mirror", Type: meta.Proxy},
+		{Name: "fleet", Type: meta.Group},
 		{Name: "secret", Type: meta.Hosted},
 	} {
 		if _, err := metaDB.CreateRepository(ctx, repo); err != nil {
@@ -102,6 +118,11 @@ func newStack(t *testing.T) stack {
 		// so a request there is refused by the handler's resolution rather than
 		// by the guard -- which is what makes the two 404s comparable.
 		{ID: "b-carol-ghost", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "ghost/*"},
+		// The group entity, granted the same way the proxy is: a group refuses
+		// a push by type, and a refusal the guard produced would prove nothing
+		// about the type (C-017, C-019).
+		{ID: "b-carol-fleet", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-carol", Role: "publisher", Scope: "fleet/*"},
+		{ID: "b-rita-fleet", PrincipalKind: meta.PrincipalSubject, PrincipalID: "u-rita", Role: "reader", Scope: "fleet/*"},
 	} {
 		if err := metaDB.CreateBinding(ctx, binding); err != nil {
 			t.Fatalf("CreateBinding: %v", err)
@@ -120,10 +141,14 @@ func newStack(t *testing.T) stack {
 		Store:    blobs,
 		Meta:     metaDB,
 		Bindings: metaDB,
+		Servers:  options.servers,
 		Now:      func() time.Time { return fixedTime },
 	}
 	handlers.Register(router)
-	(&registry.Manifests{Meta: metaDB, Now: func() time.Time { return fixedTime }}).Register(router)
+	(&registry.Manifests{
+		Meta: metaDB, Servers: options.servers, Pulls: options.pulls,
+		Now: func() time.Time { return fixedTime },
+	}).Register(router)
 	return stack{handler: router, router: router, metaDB: metaDB, blobs: blobs}
 }
 

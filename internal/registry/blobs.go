@@ -62,6 +62,10 @@ type Blobs struct {
 	Bindings server.BindingStore
 	// Quota admits new content. Nil means NoQuota.
 	Quota QuotaChecker
+	// Servers serve the repository types this registry does not hold content
+	// for (C-017). The zero value serves none, which answers a proxy or group
+	// read exactly as an unknown repository does.
+	Servers ContentServers
 	// Now supplies timestamps. Nil means time.Now.
 	Now func() time.Time
 	// Log is the fallback logger when a request carries none.
@@ -170,9 +174,14 @@ func hostedRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *s
 }
 
 // knownRepo resolves the request's repository for a read.
-func knownRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, bool) {
-	name, _, ok := routeToEntity(w, r, store, log)
-	return name, ok
+//
+// It returns the entity's record as well as the content name, because what a
+// read does next depends on the repository's type: hosted content is served
+// from this registry's own storage, and a proxy or a group is served through a
+// delegate (C-017). A helper that dropped the type would make that branch
+// impossible to write without resolving the entity twice.
+func knownRepo(w http.ResponseWriter, r *http.Request, store repoGetter, log *slog.Logger) (string, meta.Repository, bool) {
+	return routeToEntity(w, r, store, log)
 }
 
 // parsedDigest validates a digest out of the request, refusing anything the
@@ -188,11 +197,16 @@ func parsedDigest(w http.ResponseWriter, raw string) (blob.Digest, bool) {
 
 // stat serves HEAD /v2/<name>/blobs/<digest>.
 func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
-	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
+	name, entity, ok := knownRepo(w, r, b.Meta, b.Log)
+	if !ok {
 		return
 	}
 	digest, ok := parsedDigest(w, server.OCIValue(r, "digest"))
 	if !ok {
+		return
+	}
+	if delegate, delegated := b.Servers.delegated(entity.Type); delegated {
+		b.statThrough(w, r, delegate, name, digest)
 		return
 	}
 	record, err := b.Meta.GetBlob(r.Context(), meta.Digest(digest))
@@ -205,10 +219,24 @@ func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeUnknown, "internal error")
 		return
 	}
-	w.Header().Set("Content-Length", strconv.FormatInt(record.Size, 10))
+	blobHeaders(w, digest, record.Size)
+	w.WriteHeader(http.StatusOK)
+}
+
+// blobHeaders writes what every blob response carries, in one place: the two
+// paths that serve blob bytes and the two that serve them through a delegate
+// must not describe the same content differently (R-008 golden-tests this).
+//
+// A negative size means the length is unknown -- an upstream that sent no
+// Content-Length -- and the header is omitted rather than guessed at. Every
+// blob this registry stores knows its own size, so that only happens on a
+// delegated read.
+func blobHeaders(w http.ResponseWriter, digest blob.Digest, size int64) {
+	if size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
 	w.Header().Set("Docker-Content-Digest", digest.String())
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
 }
 
 // refuseDelete answers DELETE /v2/<name>/blobs/<digest>, which trove does not
@@ -226,7 +254,7 @@ func (b *Blobs) stat(w http.ResponseWriter, r *http.Request) {
 // still checked first, so a subject who cannot see the repository learns
 // nothing from the difference.
 func (b *Blobs) refuseDelete(w http.ResponseWriter, r *http.Request) {
-	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
+	if _, _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
 		return
 	}
 	if _, ok := parsedDigest(w, server.OCIValue(r, "digest")); !ok {
@@ -242,11 +270,16 @@ func (b *Blobs) refuseDelete(w http.ResponseWriter, r *http.Request) {
 // reader: corrupt content ends the stream short instead of arriving with a
 // clean EOF (ADR 0007).
 func (b *Blobs) get(w http.ResponseWriter, r *http.Request) {
-	if _, ok := knownRepo(w, r, b.Meta, b.Log); !ok {
+	name, entity, ok := knownRepo(w, r, b.Meta, b.Log)
+	if !ok {
 		return
 	}
 	digest, ok := parsedDigest(w, server.OCIValue(r, "digest"))
 	if !ok {
+		return
+	}
+	if delegate, delegated := b.Servers.delegated(entity.Type); delegated {
+		b.getThrough(w, r, delegate, name, digest)
 		return
 	}
 	if _, err := b.Meta.GetBlob(r.Context(), meta.Digest(digest)); err != nil {
@@ -269,9 +302,7 @@ func (b *Blobs) get(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = reader.Close() }()
 
-	w.Header().Set("Content-Length", strconv.FormatInt(reader.Descriptor().Size, 10))
-	w.Header().Set("Docker-Content-Digest", digest.String())
-	w.Header().Set("Content-Type", "application/octet-stream")
+	blobHeaders(w, digest, reader.Descriptor().Size)
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, reader); err != nil {
 		// The status line is gone; the short body fails the client's own

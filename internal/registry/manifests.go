@@ -55,6 +55,9 @@ type Manifests struct {
 	// Pulls counts served pulls (R-010). Nil disables recording, which costs
 	// the pull path nothing: there is no writer to hand the observation to.
 	Pulls PullRecorder
+	// Servers serve the repository types this registry does not hold content
+	// for (C-017). The zero value serves none.
+	Servers ContentServers
 	// Log is the fallback logger when a request carries none.
 	Log *slog.Logger
 }
@@ -331,15 +334,25 @@ func (m *Manifests) resolve(w http.ResponseWriter, r *http.Request, name string)
 }
 
 func manifestHeaders(w http.ResponseWriter, record meta.Manifest) {
-	w.Header().Set("Content-Type", record.MediaType)
-	w.Header().Set("Content-Length", strconv.FormatInt(record.Size, 10))
-	w.Header().Set("Docker-Content-Digest", string(record.Digest))
+	writeManifestHeaders(w, record.MediaType, record.Size, string(record.Digest))
+}
+
+// writeManifestHeaders is what every manifest response carries, hosted or
+// delegated. One renderer, because the wire format is contract (R-008).
+func writeManifestHeaders(w http.ResponseWriter, mediaType string, size int64, digest string) {
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Docker-Content-Digest", digest)
 }
 
 // head serves HEAD /v2/<name>/manifests/<reference>.
 func (m *Manifests) head(w http.ResponseWriter, r *http.Request) {
-	name, ok := knownRepo(w, r, m.Meta, m.Log)
+	name, entity, ok := knownRepo(w, r, m.Meta, m.Log)
 	if !ok {
+		return
+	}
+	if delegate, delegated := m.Servers.delegated(entity.Type); delegated {
+		m.manifestThrough(w, r, delegate, name, server.OCIValue(r, "reference"), false)
 		return
 	}
 	record, ok := m.resolve(w, r, name)
@@ -360,8 +373,12 @@ func (m *Manifests) head(w http.ResponseWriter, r *http.Request) {
 // alive against a last-pulled retention rule (§7) without anything ever having
 // been fetched.
 func (m *Manifests) get(w http.ResponseWriter, r *http.Request) {
-	name, ok := knownRepo(w, r, m.Meta, m.Log)
+	name, entity, ok := knownRepo(w, r, m.Meta, m.Log)
 	if !ok {
+		return
+	}
+	if delegate, delegated := m.Servers.delegated(entity.Type); delegated {
+		m.manifestThrough(w, r, delegate, name, server.OCIValue(r, "reference"), true)
 		return
 	}
 	record, ok := m.resolve(w, r, name)

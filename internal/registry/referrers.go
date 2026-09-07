@@ -83,7 +83,7 @@ type referrerIndex struct {
 func (rf *Referrers) list(w http.ResponseWriter, r *http.Request) {
 	// The guard already turned unreadable-for-referrer:read into this 404;
 	// what is left to catch is a repository that is truly absent.
-	name, ok := knownRepo(w, r, rf.Meta, rf.Log)
+	name, _, ok := knownRepo(w, r, rf.Meta, rf.Log)
 	if !ok {
 		return
 	}

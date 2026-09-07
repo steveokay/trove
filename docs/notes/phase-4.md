@@ -778,3 +778,54 @@ forgiving gate must not become a silent one.
 parent-comparison gate. That is what the advisory drift line is for; it is
 visible in every run's log and in the uploaded artifact, and it is a number a
 human reads rather than a build that fails on hardware.
+
+## C-017 — `/v2/` dispatch by repository type
+
+The branch four tasks deferred to. Every read handler already resolved the
+request's entity and then **threw its type away**, serving from hosted storage
+regardless — which is why a pull through a proxy or a group 404s today even
+though the fill path, the leases, the group resolver and the evictor all exist.
+`knownRepo` now returns the record, and reads branch on it.
+
+**One renderer.** A delegate returns content — `ServedManifest`,
+`ServedBlob` — and the registry writes the response. The OCI wire format is
+contract and golden-tested (R-008), so a second place that assembled those
+headers would be a second place for them to drift. Making that true meant
+extracting `blobHeaders` and `writeManifestHeaders`, which the two hosted paths
+now share with the two delegated ones; the goldens did not move, which is the
+point.
+
+**An unwired seam is a repository that does not exist.** A deployment with no
+proxy server answers 404 / `NAME_UNKNOWN` — status, code and body byte-identical
+to an unknown repository, asserted by comparing the two responses rather than by
+matching a string. "We have not wired that yet" is not something a stranger may
+learn from a response (ADR 0003). The same rule covers a repository type this
+package does not recognise: not hosted, so it is not served from hosted storage;
+no delegate, so it does not exist. Failing closed is the only safe reading of a
+value nothing recognises, and an internal test pins it because the store cannot
+produce such a type.
+
+**The error contract is three sentinels wide**, and deliberately: a client can
+act on "not here" (404), "not now" (429) and "try later" (504), and can act on
+nothing else. A proxy's own vocabulary is much richer — a rejected credential, a
+refused redirect, an unparseable manifest — and collapsing it belongs to the
+adapter C-018 brings, not to the handler. `ErrUpstreamUnavailable` maps to 504
+rather than 404 on purpose: the repository exists and could not be consulted,
+and a client that read an outage as a deletion would be wrong in the most
+expensive direction.
+
+**What did not change:** hosted reads (the delegate fails the test if a hosted
+read reaches it), writes to a proxy or group (still `DENIED` by type, never a
+404 — the repository exists, it just takes no client writes), and tag lists and
+referrers, which stay on the hosted path and answer 404 for a proxy until C-021
+decides what a proxy claims to contain. A pull is what makes a proxy useful; a
+listing is what makes it *browsable*, and the second is a product question
+rather than a wiring one.
+
+Delegated GETs are counted as pulls and HEADs are not, exactly as the hosted
+path does — a proxy's pulls feed the same statistics and the same retention
+rules.
+
+**Still to come:** C-018 implements `ContentServer` for proxies over
+`proxy.Filler`, C-019 for groups over `repo.Resolve`, and C-020 constructs both
+in serve. Until they land the seam is nil and nothing observable has changed.

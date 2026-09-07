@@ -62,7 +62,7 @@ type tagList struct {
 
 // list serves GET /v2/<name>/tags/list.
 func (t *Tags) list(w http.ResponseWriter, r *http.Request) {
-	name, ok := knownRepo(w, r, t.Meta, t.Log)
+	name, _, ok := knownRepo(w, r, t.Meta, t.Log)
 	if !ok {
 		return
 	}
