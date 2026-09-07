@@ -666,3 +666,10 @@ docs give the exact body. A `POST .../repositories {"preset": "dockerhub"}`
 shorthand and a preset listing for the UI belong with the UI task that would
 consume them. DOC-001's quickstart is what enables Docker Hub on a fresh
 install.
+
+### Verification
+
+Full gate green with the testcontainer suites up: coverage 96.4% against the
+95.0% threshold, `-race` clean, lint and gofmt clean, with `internal/hostpattern`
+and the preset accessors at 100%. CI green on 8fdc7db (run 34127467142): every
+job, conformance included.
