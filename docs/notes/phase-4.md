@@ -1096,3 +1096,5 @@ cannot be another branch of this query; it is a k-way keyset merge in the
 handler, over a seam that has to run `registry` → `groupserve` even though the
 package dependency runs the other way. Doing it here would have meant
 smuggling a second, unrelated design into a query change.
+
+CI green on 44ba3ea (run 34161139752).
