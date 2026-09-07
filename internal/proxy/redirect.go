@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/steveokay/trove/internal/hostpattern"
 )
 
 // DefaultMaxRedirects caps a redirect chain. Real registries use one hop to a
@@ -39,6 +41,11 @@ type RedirectPolicy struct {
 	// different registrable domain entirely -- and because the alternative,
 	// inferring a "family" from a public-suffix guess, silently trusts every
 	// other tenant of whatever domain the guess lands on.
+	//
+	// The grammar lives in internal/hostpattern, shared with the validation
+	// internal/repo applies to what an operator writes (C-014). A security
+	// grammar with two implementations is a security grammar with two
+	// meanings.
 	//
 	// It never grants a private address: see Allow.
 	TrustedHosts []string
@@ -142,31 +149,11 @@ func (p RedirectPolicy) Allow(upstream, u *url.URL) error {
 	}
 
 	for _, trusted := range p.TrustedHosts {
-		if matchesHost(host, trusted) {
+		if hostpattern.Match(host, trusted) {
 			return nil
 		}
 	}
 	return refuse(fmt.Sprintf("host is outside the upstream's family (%s) and is not trusted", upstreamHost))
-}
-
-// matchesHost reports whether host matches one TrustedHosts entry: an exact
-// host, or "*.domain" over that domain's subdomains. A wildcard entry does not
-// match the bare domain, because "*.example.com" and "example.com" are
-// different grants and an operator who wants both writes both.
-func matchesHost(host, pattern string) bool {
-	pattern = strings.ToLower(strings.TrimSpace(pattern))
-	if pattern == "" {
-		return false
-	}
-	// A pattern with a port is compared on its host part alone: the policy is
-	// about which machine we talk to, not which port it listens on.
-	if h, _, err := net.SplitHostPort(pattern); err == nil {
-		pattern = h
-	}
-	if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
-		return suffix != "" && strings.HasSuffix(host, "."+suffix)
-	}
-	return host == pattern
 }
 
 // isGlobalUnicast reports whether an IP literal is one we will talk to when it

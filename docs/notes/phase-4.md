@@ -604,3 +604,65 @@ the work were fixed at the source rather than retried (§9): the interval flush
 could leave an access sitting in the queue when the tick arrived first, which
 is now a drain before the flush, and a scheduler test stopped its own loop
 twice.
+
+## C-014 — Default upstream presets
+
+Five proxy configurations shipped as data: `dockerhub`, `gcr`, `ghcr`, `k8s`,
+`quay`. Nothing instantiates them, nothing reads them at boot, and creating a
+repository from one is an ordinary `repo:create` + `repo:configure` (ADR 0005).
+Q7's "shipped disabled" is therefore a property of the deployment rather than a
+flag somebody has to remember to leave off.
+
+**The part worth getting right is `trusted_hosts`.** Every one of these
+registries authenticates or serves layers from somewhere other than the host it
+is named after — Docker Hub mints tokens at `auth.docker.io` and serves blobs
+from a CDN under `docker.com`, ghcr redirects to
+`pkg-containers.githubusercontent.com`, gcr to `storage.googleapis.com`, and
+`registry.k8s.io` is a redirector to regional mirrors by design. C-002's
+redirect policy refuses all of those by default, so a preset without the list is
+a proxy whose first pull fails partway through with an error that reads like a
+bug. Quay's list is empty *on purpose*: its CDN hosts are subdomains of
+`quay.io`, which the policy already treats as the same family. The `k8s` entries
+(`*.pkg.dev`, `*.googleapis.com`, `*.amazonaws.com`) are broad because the
+mirror set is regional and changes without notice; the operator docs say so and
+say how to narrow it, and content is digest-verified on arrival regardless.
+
+**`repo.ProxyConfig` gained `TrustedHosts`**, which C-002 flagged as missing when
+it settled what "the same registry family" means. That created a second place
+the pattern grammar had to be understood, so the grammar moved to a new leaf
+package, **`internal/hostpattern`**: `Match` for the redirect policy (unchanged
+semantics — exact host or `*.domain`, case-insensitive, a wildcard never
+matching the bare domain) and `Validate` for the configuration edge. The split
+between them is deliberate. `Match` is total and lenient because it runs where
+refusing means failing a pull, and an unparseable entry must match nothing
+rather than everything; `Validate` is strict because a pattern that does not
+mean what its author thought should be refused when it is written. The clearest
+case is a port: `Match` ignores one, so an operator who wrote
+`cdn.example.com:443` believing it restricted the port would be wrong with
+nothing to tell them — `Validate` refuses it and says why. Two fuzz targets pin
+the pair: a match never widens a grant beyond the exact host or a strict
+subdomain, and anything `Validate` accepts is a shape `Match` acts on and that
+matches at least itself (no silently dead entries). This is the same
+one-grammar-one-fuzzer rule the binding scopes follow, and the same extraction
+`internal/reponame` got when two packages that cannot import each other needed
+one definition.
+
+**The acceptance criterion is a boot test, not an inspection.** `test/offline`
+runs the real `cli.Run(["serve", ...])` with `http.DefaultTransport` swapped for
+a recorder that refuses every request, waits for the server to report it is
+listening, shuts it down, and asserts nothing was attempted and no repository
+row exists. A second test asserts every preset name is *absent* after a fresh
+boot — the one that would fail if somebody wired the preset list into the
+bootstrap. The package carries a self-test proving the swap is effective, since
+a negative test that cannot fail is indistinguishable from one that passes. It
+lives in the top-level tree because it mutates process-wide state and must own
+its package's parallelism; inside `internal/cli` it would race the parallel
+serve tests already there.
+
+**Not built here:** no API or CLI surface lists presets or creates a repository
+from one by name. The plan scopes C-014 to the data and the docs, and the create
+endpoint C-016 already ships takes the configuration directly — the operator
+docs give the exact body. A `POST .../repositories {"preset": "dockerhub"}`
+shorthand and a preset listing for the UI belong with the UI task that would
+consume them. DOC-001's quickstart is what enables Docker Hub on a fresh
+install.

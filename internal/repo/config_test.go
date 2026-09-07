@@ -35,7 +35,33 @@ func TestParseConfig(t *testing.T) {
 			typ:  meta.Proxy,
 			raw: `{"upstream": "https://ghcr.io", "default_namespace": "library",
 				"allow": ["library/*", "trove"], "block": ["library/cursed"], "default_deny": true,
+				"trusted_hosts": ["auth.docker.io", "*.docker.com"],
 				"tag_ttl": "15m", "negative_ttl": "60s", "offline_mode": "strict"}`,
+		},
+		{
+			// The trusted-host grammar is internal/hostpattern's, shared with
+			// the redirect policy that matches against it (C-014). What is
+			// asserted here is that the edge applies it at all: a pattern
+			// nobody validated becomes a silently dead entry in an SSRF
+			// allowlist, and the first sign of it is a pull that fails.
+			name: "proxy trusted host with a scheme", typ: meta.Proxy,
+			raw:     `{"upstream": "https://h", "trusted_hosts": ["https://auth.docker.io"]}`,
+			wantErr: "trusted_hosts",
+		},
+		{
+			name: "proxy trusted host with a port", typ: meta.Proxy,
+			raw:     `{"upstream": "https://h", "trusted_hosts": ["cdn.example.com:443"]}`,
+			wantErr: "port",
+		},
+		{
+			name: "proxy trusted host with an interior wildcard", typ: meta.Proxy,
+			raw:     `{"upstream": "https://h", "trusted_hosts": ["a.*.com"]}`,
+			wantErr: "trusted_hosts",
+		},
+		{
+			name: "proxy empty trusted host", typ: meta.Proxy,
+			raw:     `{"upstream": "https://h", "trusted_hosts": [""]}`,
+			wantErr: "trusted_hosts",
 		},
 		{name: "proxy without upstream", typ: meta.Proxy, raw: "{}", wantErr: "upstream"},
 		{name: "proxy empty raw", typ: meta.Proxy, raw: "", wantErr: "upstream"},

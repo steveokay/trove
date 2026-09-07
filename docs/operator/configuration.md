@@ -148,6 +148,53 @@ built from.
 > object store's integrity guarantees instead of trove's. It is faster and it
 > is a deliberate trade.
 
+## Upstream presets
+
+trove ships proxy configurations for five public registries. They are **values
+in the binary, not repositories**: a fresh install has no proxy, makes no
+outbound connection, and proxies nothing until you create a repository from one.
+A test boots a default install and fails if either claim stops being true.
+
+| Preset | Upstream | Notes |
+|---|---|---|
+| `dockerhub` | `https://registry-1.docker.io` | Rewrites bare names to `library/`, so `nginx` resolves. |
+| `gcr` | `https://gcr.io` | Distroless and older GKE images. |
+| `ghcr` | `https://ghcr.io` | GitHub Container Registry. |
+| `k8s` | `https://registry.k8s.io` | Redirects each client to a regional mirror. |
+| `quay` | `https://quay.io` | Red Hat's registry. |
+
+Creating one is an ordinary repository create (`repo:create` at `system` scope,
+plus `repo:configure` for the configuration):
+
+```
+POST /api/v1/repositories
+{"name": "dockerhub", "type": "proxy",
+ "config": {"upstream": "https://registry-1.docker.io",
+            "default_namespace": "library",
+            "trusted_hosts": ["auth.docker.io", "*.docker.com"]}}
+```
+
+Then `docker pull <your-registry>/dockerhub/nginx:1.27` is served through the
+cache.
+
+**`trusted_hosts` is the field that is easy to leave out and hard to diagnose.**
+Every large registry authenticates or serves layers from somewhere other than
+the host you point at — Docker Hub tokens come from `auth.docker.io` and its
+layers from a CDN under `docker.com` — and the redirect policy refuses to follow
+a redirect, or send a credential to a realm, outside the upstream's own host and
+subdomains. Without the entry the first pull fails partway through, in the
+redirect policy, with an error that reads like a bug. Entries are an exact host
+(`auth.docker.io`) or a wildcard over one domain's subdomains (`*.docker.com`);
+a wildcard does not match the bare domain, and no entry ever grants a private,
+loopback, or link-local address.
+
+> The `k8s` preset trusts `*.pkg.dev`, `*.googleapis.com`, and `*.amazonaws.com`
+> because `registry.k8s.io` is a redirector to regional mirrors whose hostnames
+> change without notice. Those are broad grants — they trust other tenants of
+> the same providers to be *reachable*, though never to be believed: content is
+> still digest-verified on arrival. If your deployment pulls from one region,
+> narrow the list to the mirrors you actually see.
+
 ## Cache eviction
 
 `cache.budget` (50 GB by default) is what proxy-cached content may occupy. When

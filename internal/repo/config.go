@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveokay/trove/internal/authz"
+	"github.com/steveokay/trove/internal/hostpattern"
 	"github.com/steveokay/trove/internal/meta"
 	"github.com/steveokay/trove/internal/reponame"
 )
@@ -76,6 +77,22 @@ type ProxyConfig struct {
 	// DefaultDeny refuses remainders that match no Allow pattern, turning the
 	// proxy from an open relay over one upstream into an allowlist.
 	DefaultDeny bool `json:"default_deny,omitempty"`
+	// TrustedHosts are hosts the client may be redirected to, or send the
+	// upstream's credentials to, beyond the upstream's own host and its
+	// subdomains. Entries use the internal/hostpattern grammar: an exact host
+	// or `*.domain` over that domain's subdomains.
+	//
+	// It exists because every large public registry needs it — Docker Hub
+	// authenticates at `auth.docker.io` and serves blobs from a CDN under a
+	// different registrable domain, and registry.k8s.io is a redirector to
+	// mirrors by design (C-014's presets carry the lists). It is configuration
+	// rather than inference because the alternative, guessing a "family" from
+	// a public suffix, silently trusts every other tenant of whatever domain
+	// the guess lands on.
+	//
+	// It never grants a private, loopback, or link-local address: the redirect
+	// policy refuses those before it consults this list at all.
+	TrustedHosts []string `json:"trusted_hosts,omitempty"`
 	// TagTTL and NegativeTTL override the deployment-wide lease TTLs
 	// (ADR 0008), as Go durations. Empty means the global setting; "0s" on
 	// TagTTL means revalidate every pull.
@@ -127,6 +144,11 @@ func (c ProxyConfig) Validate() error {
 			if scope.String() == "system" {
 				return configErr(field.name, "system is a binding scope, not a routing pattern")
 			}
+		}
+	}
+	for _, host := range c.TrustedHosts {
+		if err := hostpattern.Validate(host); err != nil {
+			return configErr("trusted_hosts", err.Error())
 		}
 	}
 	for _, field := range []struct {
