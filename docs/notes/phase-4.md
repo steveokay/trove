@@ -952,3 +952,99 @@ level they exist at.
 server exists and nothing builds one, so a group pull still answers as an
 unwired delegate does: 404, indistinguishable from a repository that is not
 there.
+
+## C-020 — Serve assembly for proxy and cache
+
+The task that makes the previous four real. `internal/proxyserve` and
+`internal/groupserve` were both complete, tested, and unreachable: nothing
+built one, so a proxy pull answered exactly as an unwired delegate does — 404,
+indistinguishable from a repository that is not there. This is the wiring, and
+it lives in `internal/cli/serve.go` and nowhere else (ADR 0009 wall 2).
+
+**A live pull is the acceptance criterion, and it is the point.** Everything
+below the wiring already had tests against a fake: the fill path against a
+contract-equivalent upstream, the adapter against a fake filler, the dispatcher
+against a fake delegate. None of them can show that the wiring hands the right
+pieces to each other — that the cache store is the cache-rooted one, that the
+client carries the entity's configuration, that a pull reaches an upstream and
+comes back. So `internal/cli/proxypull_test.go` boots the real `serve` over a
+seeded data directory and pulls through it. Five tests, and between them they
+are the first moment in this project where `docker pull` works:
+
+- a tag pull and the layer it names, through a proxy, byte-identical to what
+  the upstream served — then the process is stopped and the *cached family*
+  rows are checked directly, with the hosted family asserted empty. That
+  assertion is ADR 0009's proving assertion (a) moved off a fixture and onto
+  the real wiring, which is what the task asked for;
+- the same pull with the upstream closed afterwards, served from cache;
+- content never cached with the upstream unreachable, answered **504** — not
+  404. A client that cached that not-found would keep failing after the
+  upstream came back;
+- **a pull through a group**, which is the product's headline feature working
+  end to end: one URL, an ordered member list behind it, a client that never
+  learns which member answered. The test also pulls the same reference through
+  the proxy directly and requires the two byte-identical, because a group is a
+  way of *finding* content, not a way of changing it;
+- a group whose only useful member the subject cannot read, answering 404 —
+  C-012's filtering, over the real server, with real bindings.
+
+**Two things can make a cached upstream client stale, and they are handled
+differently** (`internal/proxyserve/clients.go`). A client is not a value to
+build per request: it carries the tokens an upstream issued, the rate-limit
+standing that decides whether the next call may be made at all (C-009), and a
+connection pool. So clients are cached per entity — and the interesting
+question is when a cached one stops being right.
+
+The upstream URL and the trusted-host list are baked into a client, so a
+reconfigured proxy needs a new one; the repository row's config version is part
+of the cache key, so C-016's update *retires* the old client rather than
+requiring anything to notice and evict it. Credentials are the opposite:
+`proxy.StoredCredentials` reads the sealed row and opens it per request
+(C-003), so a rotation takes effect on the next pull with no invalidation at
+all. That is why the key says nothing about credentials — there is nothing
+cached to go stale. Both rules have a test, because either one being wrong is
+invisible until an operator changes something and nothing happens.
+
+`TrustedHosts` comes from the entity's own configuration and there is no global
+list: a host trusted for Docker Hub has no business being trusted for
+somebody's internal registry (C-014).
+
+**`openCacheBlobStore` is a near-copy of `openHostedBlobStore` on purpose.**
+The obvious refactor — one function with a parameter saying which half — is
+exactly the shape ADR 0009 exists to prevent: it puts the cached and hosted
+roots one argument apart, where a mistake is a typo rather than a type error.
+Duplicating thirty lines is the cheaper side of that trade. The two differ in
+substance anyway: the corrupt-blob callback logs a quarantined *cached* blob,
+which is a recoverable event, where the hosted one is not.
+
+**Nothing that can fail runs after something has started.** `go vet` caught the
+first version of this: I had inserted the server construction between the
+reaper goroutine and the listener, so an error building the proxy servers
+returned while the reaper was still running. Construction now happens first and
+the two background loops (upload reaper, cache eviction) start last, immediately
+before the listener — so no early return can leave a goroutine behind. Shutdown
+runs in reverse: stop the reaper and wait for it, stop eviction, then flush the
+pull statistics, the cache-access batcher, and the event bus, in that order.
+The touch batcher must flush before the process ends or eviction would later
+rank content served seconds ago as the coldest thing in the cache.
+
+`startCacheEviction` cannot fail, which is why it is separate from
+`buildEvictor`: the fallible half runs during construction, the goroutine half
+runs where nothing may return early. Its one unreachable error path logs and
+serves anyway — a cache that stops evicting grows, which is visible in the
+storage metrics; a registry that refuses to start serves nothing.
+
+**Per-proxy cache carve-outs still have no configuration field.** C-013's
+evictor takes a map of them and serve passes an empty one, so every proxy
+shares the global budget. That is deliberate: what a per-proxy budget means for
+a member of a group is not obvious (does a group pull spend the member's
+budget, or the group's?), and it belongs with whoever answers C-021's
+questions rather than being guessed at here.
+
+`test/offline` still passes unchanged: a fresh install builds all of this and
+makes zero outbound requests, because every preset stays disabled until an
+operator creates a repository from one.
+
+`internal/proxyserve/clients.go` at 100%. The new serve helpers carry the same
+uncovered construction-error and S3-driver branches the file's existing
+`openHostedBlobStore` does; the package is unchanged in character.

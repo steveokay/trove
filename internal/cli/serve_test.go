@@ -20,6 +20,7 @@ import (
 	"github.com/steveokay/trove/internal/authn/token"
 	blobmem "github.com/steveokay/trove/internal/blob/memory"
 	"github.com/steveokay/trove/internal/meta/memory"
+	"github.com/steveokay/trove/internal/registry"
 )
 
 // syncBuffer is an io.Writer safe to read while a server goroutine logs into
@@ -257,7 +258,11 @@ func TestAssembledRouteTable(t *testing.T) {
 		t.Fatalf("NewSigner: %v", err)
 	}
 
-	router := buildRouter(store, blobmem.New(blobmem.Options{}), login, nil, signer, nil, "", 0, nil, nil)
+	// The delegates are left unwired: this test is about the assembled route
+	// table, and a route serves the same paths whether or not proxying is
+	// configured (C-017).
+	router := buildRouter(store, blobmem.New(blobmem.Options{}), login, nil, signer, nil, "", 0, nil,
+		registry.ContentServers{}, nil)
 	if err := router.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
