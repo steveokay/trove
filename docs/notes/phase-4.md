@@ -736,3 +736,45 @@ asserts the upstream is not called at all while the backoff stands and *is*
 called again once the window passes, and the stale-tag pair asserts serve-stale
 answers from the lease with `Stale` set and an event, while strict refuses and
 publishes nothing.
+
+### Bench gate made machine-fair (2026-09-07)
+
+C-015's own commit failed CI on the push-latency gate, and it is a test-only
+commit: `BenchmarkMonolithicBlobPush100MiB` came back 38% over its baseline
+with an identical allocation profile (268 MB/op, 75 allocs, unchanged across
+every run for days). The numbers across four runs that day settle it:
+
+| run | runner CPU | 100 MiB push | allocs/op |
+|---|---|---|---|
+| 34126240796 | EPYC 9V74 | 79 ms | 75 |
+| 34059109589 | EPYC 9V74 | 103 ms | 78 |
+| 34127467142 | EPYC 7763 | 96 ms | 75 |
+| 34151507639 | **Xeon 8370C** | **134 ms** | 75 |
+
+`ubuntu-latest` is not one machine. R-012's gate was built on the assumption
+that it is — "capture the baseline on the runner that enforces it" — and that
+assumption is what broke. The 1 MiB variant barely moved (+1.3%) while the
+100 MiB one moved 38%, which says where the machines differ: the large push is
+DRAM-bandwidth bound and the small one fits in cache.
+
+**The fix is not a looser tolerance.** Raising it to cover a 1.7× hardware
+spread would blind the gate to a real 30% regression, which is the only thing
+it exists to catch. Instead CI now measures the **parent commit on the same
+runner, in the same job**, and enforces the commit under test against that. A
+difference is then a difference in the code. `bench-check.sh` needed no new
+comparison logic for this — its recording mode already emits a baseline file,
+so the parent's numbers are simply fed back in as one.
+
+What is new is small: `BENCH_ADVISORY` reports without failing, and `BENCH_RAW`
+saves the raw benchmark output so the second comparison re-reads one
+measurement instead of paying for the benchmarks twice. The committed
+`scripts/bench-baseline.txt` survives as long-run drift context, read in
+advisory mode and relabelled in the file itself so nobody re-baselines it
+believing it is a gate. Seven self-test cases cover the new mode, including
+that advisory forgives a regression but never a malformed baseline — a
+forgiving gate must not become a silent one.
+
+**The trade, stated:** a regression that arrives 5% per commit never trips a
+parent-comparison gate. That is what the advisory drift line is for; it is
+visible in every run's log and in the uploaded artifact, and it is a number a
+human reads rather than a build that fails on hardware.

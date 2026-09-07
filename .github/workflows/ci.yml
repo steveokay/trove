@@ -76,20 +76,46 @@ jobs:
     name: Push latency
     runs-on: ubuntu-latest
     steps:
+      # Two commits deep: the gate compares this one against its parent on the
+      # same machine, which needs the parent's code.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
       - name: Verify the benchmark gate script
         run: bash scripts/bench-check-selftest.sh
-      # Enforces when scripts/bench-baseline.txt exists; records and passes
-      # when it does not, or when it has no entry for a benchmark. Baselines
-      # are hardware-specific, so the first numbers come from this job rather
-      # than from anyone's workstation: download the bench-baseline-candidate
-      # artifact and commit its file as scripts/bench-baseline.txt.
-      - name: Compare push latency against the baseline
-        run: bash scripts/bench-check.sh scripts/bench-baseline.txt bench-candidate.txt
+      # A baseline is only comparable to a measurement from the same hardware,
+      # and ubuntu-latest is not one machine: the same benchmark measured 79ms,
+      # 96ms and 134ms across three runners in one day, with an identical
+      # allocation profile. So the parent commit is measured here, now, on this
+      # runner, and becomes the baseline for the commit under test. A
+      # regression is then a difference in the code, which is the only kind
+      # worth failing a build over.
+      - name: Measure the parent commit on this runner
+        run: |
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            git worktree add ../bench-parent HEAD~1
+            (cd ../bench-parent && bash scripts/bench-check.sh /nonexistent "$GITHUB_WORKSPACE/parent-bench.txt")
+          else
+            echo "bench: no parent commit to compare against; the gate records instead"
+          fi
+      - name: Compare push latency against the parent commit
+        env:
+          BENCH_RAW: head-bench.txt
+        run: bash scripts/bench-check.sh parent-bench.txt bench-candidate.txt
+      # The committed baseline stays as long-run drift context. It was captured
+      # on whatever runner CI happened to give us, so it reports rather than
+      # fails -- a machine change must not read as a regression. It re-reads
+      # the measurement above rather than benchmarking again: two comparisons
+      # of one run say more than two runs compared to different things.
+      - name: Report drift against the committed baseline
+        env:
+          BENCH_ADVISORY: "1"
+          BENCH_INPUT: head-bench.txt
+        run: bash scripts/bench-check.sh scripts/bench-baseline.txt drift-candidate.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

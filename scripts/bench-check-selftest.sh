@@ -42,12 +42,15 @@ input="$tmp/bench.out"
 
 # assert <name> <expected-exit> <baseline-file> [tolerance]
 assert() {
-	local name="$1" want="$2" baseline="$3" tolerance="${4:-}"
+	local name="$1" want="$2" baseline="$3" tolerance="${4:-}" advisory="${5:-}"
 	local got=0
 	(
 		export BENCH_INPUT="$input"
 		if [[ -n "$tolerance" ]]; then
 			export BENCH_TOLERANCE="$tolerance"
+		fi
+		if [[ -n "$advisory" ]]; then
+			export BENCH_ADVISORY="$advisory"
 		fi
 		bash "$gate" "$baseline" "$tmp/candidate.txt"
 	) >"$tmp/last.log" 2>&1 || got=$?
@@ -114,6 +117,26 @@ assert "one regressed benchmark fails the run" 1 "$tmp/one-bad.txt"
 # The tolerance is configurable in both directions.
 assert "a tighter tolerance is honoured" 1 "$tmp/within.txt" 5
 assert "a looser tolerance is honoured" 0 "$tmp/regressed.txt" 50
+
+# --- advisory: report, do not fail ------------------------------------------
+# The mode the committed baseline is read in, now that it may have been taken
+# on different hardware from the runner enforcing it. A regression must still
+# be printed in full -- the number is the whole point -- and must not fail.
+assert "an advisory regression does not fail the build" 0 "$tmp/regressed.txt" "" 1
+contains "the advisory run still marks the regression" "REGRESSION"
+contains "the advisory run says it stood down" "advisory"
+contains "the advisory run still prints the measured number" "1000000"
+
+# Advisory changes the verdict, never the measurement: a healthy comparison
+# reads exactly as it does without it.
+assert "advisory leaves a passing comparison alone" 0 "$tmp/exact.txt" "" 1
+contains "the advisory pass prints the table" "measured ns/op"
+
+# Bad input is still bad input: advisory forgives a regression, not a
+# malformed baseline, or it would turn a broken gate into a silent one.
+printf 'BenchmarkMonolithicBlobPush1MiB not-a-number
+' >"$tmp/advisory-malformed.txt"
+assert "advisory does not forgive a malformed baseline" 2 "$tmp/advisory-malformed.txt" "" 1
 
 # --- missing baseline: record, never fail -----------------------------------
 assert "an absent baseline records instead of failing" 0 "$tmp/does-not-exist.txt"
