@@ -829,3 +829,69 @@ rules.
 **Still to come:** C-018 implements `ContentServer` for proxies over
 `proxy.Filler`, C-019 for groups over `repo.Resolve`, and C-020 constructs both
 in serve. Until they land the seam is nil and nothing observable has changed.
+
+## C-018 — proxy pulls over `/v2/`
+
+`internal/proxyserve` is the adapter between two packages that must not know
+about each other: `internal/registry` renders the wire format and knows nothing
+about upstreams, `internal/proxy` fetches and caches and knows nothing about
+HTTP. It sits above both rather than inside either, which is what has kept the
+fill path testable against a contract-equivalent fake and the handlers testable
+against golden responses.
+
+**The namespace rewrite finally exists.** ADR 0005 has described it since the
+beginning — `nginx` means `library/nginx` on a Docker Hub proxy — and nothing
+implemented it, because nothing had a remainder to rewrite until a request
+reached this far. It rewrites a *single-segment* remainder only: `library/nginx`
+and `myorg/app` already name their namespace, and prefixing those would produce
+`library/library/nginx`. The rule is about the shape of the remainder, not
+about whether it happens to resolve.
+
+**Routing rules evaluate the rewritten path**, which is C-010's reconciled
+decision stated as executable code at last. A test pins the case that settled
+it: a `library/*` allow-rule with default-deny admits a bare `nginx`, which is
+the most common pull on the preset the rule was written for. A refused path is
+reported as content that is not there — which paths a proxy admits is
+configuration, and a client that could tell "blocked" from "absent" could map
+the rules by asking (ADR 0003).
+
+**The error vocabulary collapses here**, and that is the point of the package
+existing. A proxy distinguishes a rejected credential from a refused redirect
+from an unparseable manifest; a client can act on "not here", "not now" and
+"try later" and on nothing else. Two of those collapses are deliberate and
+worth stating: a **digest mismatch** becomes "unavailable" rather than
+"unknown", because the upstream lying is not the client's problem to interpret
+and the incident is already in the events; **refused credentials** become
+"unavailable" too, so a client retries rather than caching a not-found while an
+operator fixes the secret. Anything unclassified is passed through untouched
+and rendered as a 500 — a failure nobody classified is a bug, and a 404 would
+hide it.
+
+**Configuration is read per request.** That is a store read per pull, and it is
+the honest starting point: a configuration change takes effect on the next
+request rather than whenever a cache happened to expire, and there is no
+invalidation to get wrong. A cache in front of it is a later optimisation that
+will have to make its own correctness argument.
+
+**Three defensive branches were deleted rather than tested**, because they
+could not be reached through a validated configuration and a branch that cannot
+fail is a branch nobody can test and everybody has to read: a duration that
+will not parse (the edge validated it; the zero it would fall back to is the
+conservative reading anyway), an upstream URL carrying a path (refused when
+stored), and the "already classified" arm of the error mapping (target failures
+never reach the classifier). `repo.ParseProxyConfig` was added for the same
+reason — a typed parse means the serving path no longer asserts on a type
+assertion that could never fail.
+
+**C-015's traversal scenario grew its third assertion**, as its comment
+promised. It now drives hostile names through the real serving path — router,
+rewrite, routing rules — and asserts the upstream path that comes out never
+climbs out of the namespace, has no empty segment, and is never absolute. The
+rewrite is the only step that *builds* a path rather than checking one, which
+is exactly why it deserved the assertion.
+
+**Still to come:** C-019 for groups, and C-020 to construct any of this in
+serve. `proxyserve.Clients` is the seam the wiring implements — building a
+client means decrypting a credential (C-003), applying the entity's trusted
+hosts (C-014), and sharing a rate-limit standing across every request to that
+upstream (C-009), all of which have a lifetime this package should not own.

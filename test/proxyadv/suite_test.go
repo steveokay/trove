@@ -2,6 +2,7 @@ package proxyadv_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,8 +16,10 @@ import (
 	"github.com/steveokay/trove/internal/blob"
 	"github.com/steveokay/trove/internal/event"
 	"github.com/steveokay/trove/internal/meta"
+	metamemory "github.com/steveokay/trove/internal/meta/memory"
 	"github.com/steveokay/trove/internal/proxy"
 	"github.com/steveokay/trove/internal/proxy/clienttest"
+	"github.com/steveokay/trove/internal/proxyserve"
 	"github.com/steveokay/trove/internal/repo"
 )
 
@@ -570,23 +573,39 @@ func testTraversalViaTheUpstreamMapping(t *testing.T) {
 }
 
 // testTraversalViaTheNamespaceRewrite: a hostile remainder on its way through
-// the router and the routing rules.
+// the router, the namespace rewrite, and the routing rules.
 //
-// The rewrite itself -- Docker Hub's `nginx` to `library/nginx` -- belongs to
-// the `/v2/` wiring that does not exist yet, so what is asserted here is the
-// pair of gates that do: `repo.Split`, which validates the whole name before
-// anything is a path, and `RoutingRules.Evaluate`, which validates the
-// remainder again as the resource its patterns match against. Neither may ever
-// hand back a name carrying traversal. When the rewrite lands, it goes between
-// them and this scenario grows a third assertion.
+// Three gates, in the order a request meets them: `repo.Split` validates the
+// whole name before anything is a path; the rewrite (C-018) turns a bare name
+// into `library/<name>` on a Docker Hub proxy; and `RoutingRules.Evaluate`
+// validates the rewritten path again as the resource its patterns match
+// against. None of them may hand back a name carrying traversal, and the
+// rewrite in the middle is the interesting one -- it is the only step that
+// *builds* a path rather than checking one.
 func testTraversalViaTheNamespaceRewrite(t *testing.T) {
 	preset, err := repo.PresetByName("dockerhub")
 	if err != nil {
 		t.Fatalf("PresetByName: %v", err)
 	}
-	rules, err := repo.CompileRoutingRules(preset.Config())
+	config, err := json.Marshal(preset.Config())
 	if err != nil {
-		t.Fatalf("CompileRoutingRules: %v", err)
+		t.Fatalf("marshal the preset config: %v", err)
+	}
+
+	store := metamemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.CreateRepository(context.Background(), meta.Repository{
+		Name: "hub", Type: meta.Proxy, Config: config, CreatedAt: testTime, UpdatedAt: testTime,
+	}); err != nil {
+		t.Fatalf("CreateRepository: %v", err)
+	}
+
+	filler := &recordingFiller{}
+	server, err := proxyserve.New(proxyserve.Options{
+		Meta: store, Clients: nowhereClients{}, Filler: filler, Log: quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("proxyserve.New: %v", err)
 	}
 
 	for _, name := range []string{
@@ -598,32 +617,91 @@ func testTraversalViaTheNamespaceRewrite(t *testing.T) {
 		"hub//nginx",
 		"hub/nginx/",
 		"hub/\\admin",
-		"hub/n\x00ginx",
+		// A NUL inside a name, built rather than written: a source file
+		// carrying one is a source file most tools mangle.
+		"hub/n" + string(rune(0)) + "ginx",
+		"hub/nginx",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			entity, remainder, err := repo.Split(name)
-			if err != nil {
-				// Refused at the router: the name never becomes a path, an
-				// upstream request, or a cache key.
+			// Driven through the real serving path -- router, namespace
+			// rewrite, routing rules -- rather than through the rewrite alone,
+			// because what must hold is a property of the path a request
+			// actually takes.
+			if _, err := server.Manifest(context.Background(), name, "v1"); err != nil {
+				// Refused somewhere along it: the name never became an
+				// upstream path.
 				return
-			}
-			if entity != "hub" {
-				t.Fatalf("Split(%q) routed to entity %q", name, entity)
-			}
-			if strings.Contains(remainder, "..") || strings.HasPrefix(remainder, "/") {
-				t.Fatalf("Split(%q) produced remainder %q, which leaves the namespace", name, remainder)
 			}
 
-			// The routing layer validates the remainder a second time, as the
-			// resource its patterns match against, so the check that closes
-			// traversal and the check that decides are the same check.
-			if _, err := rules.Evaluate(remainder); err != nil {
-				return
+			upstream := filler.upstreamFor(t, name)
+			switch {
+			case strings.Contains(upstream, ".."):
+				t.Fatalf("%q became upstream path %q, which climbs out of the namespace", name, upstream)
+			case strings.HasPrefix(upstream, "/"):
+				t.Fatalf("%q became upstream path %q, which is absolute", name, upstream)
+			case strings.Contains(upstream, "//"):
+				t.Fatalf("%q became upstream path %q, which has an empty segment", name, upstream)
+			}
+			// The Docker Hub preset namespaces every bare name, so anything
+			// that got through is either already namespaced or now is.
+			if !strings.Contains(upstream, "/") {
+				t.Fatalf("%q became upstream path %q, which is neither namespaced nor a path", name, upstream)
 			}
 		})
 	}
+}
+
+// recordingFiller answers nothing and remembers which upstream path it was
+// asked for, which is what the traversal scenario asserts on.
+type recordingFiller struct {
+	mu      sync.Mutex
+	targets map[string]string
+}
+
+func (f *recordingFiller) note(t proxy.Target) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.targets == nil {
+		f.targets = map[string]string{}
+	}
+	f.targets[t.Repository] = t.Upstream
+}
+
+func (f *recordingFiller) upstreamFor(t *testing.T, name string) string {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	upstream, ok := f.targets[name]
+	if !ok {
+		t.Fatalf("the filler was never asked about %q", name)
+	}
+	return upstream
+}
+
+func (f *recordingFiller) ResolveTag(_ context.Context, t proxy.Target, _ string) (proxy.TagResolution, error) {
+	f.note(t)
+	return proxy.TagResolution{Digest: blob.FromBytes(blob.SHA256, []byte("x"))}, nil
+}
+
+func (f *recordingFiller) Manifest(_ context.Context, t proxy.Target, _ blob.Digest) (proxy.ManifestResult, error) {
+	f.note(t)
+	return proxy.ManifestResult{}, nil
+}
+
+func (f *recordingFiller) Blob(_ context.Context, t proxy.Target, _ blob.Digest) (proxy.BlobResult, error) {
+	f.note(t)
+	return proxy.BlobResult{}, nil
+}
+
+// nowhereClients hands out a client nothing calls: the filler is recorded, not
+// executed.
+type nowhereClients struct{}
+
+func (nowhereClients) ClientFor(context.Context, string) (proxy.Client, error) {
+	return nil, nil
 }
 
 // --- concurrency and staleness -------------------------------------------

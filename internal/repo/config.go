@@ -172,6 +172,32 @@ func (c ProxyConfig) Validate() error {
 	return nil
 }
 
+// ParseProxyConfig decodes and validates a proxy entity's configuration,
+// typed.
+//
+// It exists so a caller that already knows the entity is a proxy -- the
+// serving path, which was routed there by type (C-017, C-018) -- does not have
+// to assert on what ParseConfig returned. That assertion could never fail, and
+// a branch that can never fail is a branch nobody can test and everybody has
+// to read.
+func ParseProxyConfig(raw []byte) (ProxyConfig, error) {
+	parsed, err := ParseConfig(meta.Proxy, raw)
+	if err != nil {
+		return ProxyConfig{}, err
+	}
+	// ParseConfig(meta.Proxy, ...) constructs this type and no other, so the
+	// conversion is total. It is still written in the checked form: an
+	// unchecked assertion is a panic waiting for a future edit to this
+	// package's own switch, and no configuration is worth a crash in a serving
+	// path (§11).
+	config, ok := parsed.(ProxyConfig)
+	if !ok {
+		return ProxyConfig{}, configErr("config", fmt.Sprintf(
+			"parsed as %T rather than a proxy configuration", parsed))
+	}
+	return config, nil
+}
+
 // ParseConfig decodes and validates a stored or submitted configuration for
 // an entity type. Unknown fields are refused — a typo in a config key must be
 // an error, not a silently ignored intention. Empty input is the zero
