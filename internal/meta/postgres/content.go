@@ -342,17 +342,36 @@ func (s *Store) ListContentNames(ctx context.Context, opts meta.ListOptions) (me
 		return meta.ContentNamePage{}, err
 	}
 
-	// The scope filter numbers its own parameters, so the cursor and the limit
-	// continue from wherever it stopped.
-	where, args := sqlutil.VisibilityClause("repo_name", opts.Visibility, sqlutil.Dollar, 1)
+	// The scope filter numbers its own parameters, so everything after it
+	// continues from wherever it stopped -- and the union needs the clause
+	// twice, which means numbering it twice. The same rule guards both halves:
+	// a name the subject cannot see must not appear from the cached side.
+	hosted, hostedArgs := sqlutil.VisibilityClause("repo_name", opts.Visibility, sqlutil.Dollar, 1)
 	limit := opts.EffectiveLimit()
-	cursorArg := sqlutil.Dollar(len(args) + 1)
-	limitArg := sqlutil.Dollar(len(args) + 2)
+
+	hostedCursor := sqlutil.Dollar(len(hostedArgs) + 1)
+	cached, cachedArgs := sqlutil.VisibilityClause("repo_name", opts.Visibility,
+		sqlutil.Dollar, len(hostedArgs)+2)
+	cachedCursor := sqlutil.Dollar(len(hostedArgs) + len(cachedArgs) + 2)
+	limitArg := sqlutil.Dollar(len(hostedArgs) + len(cachedArgs) + 3)
+
+	args := make([]any, 0, len(hostedArgs)+len(cachedArgs)+3)
+	args = append(args, hostedArgs...)
+	args = append(args, opts.Cursor)
+	args = append(args, cachedArgs...)
 	args = append(args, opts.Cursor, limit+1)
 
+	// The union is wrapped in a subquery: ORDER BY and LIMIT apply to the
+	// merged result, and neither engine accepts them on the branches. UNION
+	// (not UNION ALL) de-duplicates a name that somehow holds both kinds.
 	names, err := sqlutil.Collect(ctx, s.db,
-		`SELECT DISTINCT repo_name FROM manifests
-		 WHERE `+where+` AND repo_name > `+cursorArg+` ORDER BY repo_name LIMIT `+limitArg,
+		`SELECT name FROM (
+		     SELECT DISTINCT repo_name AS name FROM manifests
+		      WHERE `+hosted+` AND repo_name > `+hostedCursor+`
+		     UNION
+		     SELECT DISTINCT repo_name AS name FROM cached_manifests
+		      WHERE `+cached+` AND repo_name > `+cachedCursor+`
+		 ) AS names ORDER BY name LIMIT `+limitArg,
 		args,
 		func(rows *sql.Rows) (string, error) {
 			var name string

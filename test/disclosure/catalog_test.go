@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -216,5 +218,118 @@ func TestCatalogSurfaceChallengesAnonymous(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), registry.CodeUnauthorized) {
 		t.Errorf("body = %s, want the spec envelope on the /v2/ tree", rec.Body)
+	}
+}
+
+// The catalog is the union of hosted and cached content (C-021), which means
+// the cached half is a tenth surface for the same leak. It is worth its own
+// walk rather than a store-level assertion: the union happens inside one
+// query, and an implementation that filtered only the hosted branch would
+// still return the right *names* to an unrestricted subject and leak only to a
+// scoped one, through exactly the pages, counts and cursors ADR 0003 names.
+
+// catalogCachedVisible is the proxied content the scoped subject may list.
+// The names interleave with their hidden neighbours because the hidden ones
+// share their prefixes.
+var catalogCachedVisible = []string{
+	"dockerhub/library/nginx", "dockerhub/library/redis", "ghcr/steveokay/trove",
+}
+
+// catalogCachedFixture is catalogNewFixture plus two proxy entities holding
+// cached content, half of it unreadable by the subject.
+func catalogCachedFixture(t *testing.T) catalogFixture {
+	t.Helper()
+
+	ctx := context.Background()
+	f := catalogNewFixture(t)
+
+	for _, entity := range []string{"dockerhub", "ghcr"} {
+		if _, err := f.store.CreateRepository(ctx, meta.Repository{
+			Name: entity, Type: meta.Proxy,
+		}); err != nil {
+			t.Fatalf("CreateRepository(%q): %v", entity, err)
+		}
+	}
+
+	for i, name := range catalogCachedVisible {
+		for _, repo := range []string{name, name + catalogHiddenSuffix} {
+			if err := f.store.PutCachedManifest(ctx, meta.CachedManifest{
+				Repository: repo,
+				Digest:     meta.Digest(fmt.Sprintf("sha256:%064x", 1000+i*2+len(repo))),
+				MediaType:  "application/vnd.oci.image.manifest.v1+json",
+				Payload:    []byte(`{"schemaVersion":2}`),
+				Size:       19,
+			}, nil); err != nil {
+				t.Fatalf("PutCachedManifest(%q): %v", repo, err)
+			}
+		}
+		// Exact scopes again, for the same reason: a prefix would sweep in the
+		// hidden neighbour and the test would assert nothing.
+		if err := f.store.CreateBinding(ctx, meta.Binding{
+			ID:            fmt.Sprintf("cb-catalog-cached-%d", i),
+			PrincipalKind: meta.PrincipalSubject,
+			PrincipalID:   "u-catalog-carol",
+			Role:          "catalog-developer",
+			Scope:         name,
+		}); err != nil {
+			t.Fatalf("CreateBinding(%q): %v", name, err)
+		}
+	}
+	return f
+}
+
+func TestCatalogSurfaceHidesUnreadableCachedContent(t *testing.T) {
+	t.Parallel()
+	f := catalogCachedFixture(t)
+
+	// Both kinds, in one lexical order, because that is what a client walks.
+	want := append(append([]string{}, catalogCachedVisible...), catalogVisible...)
+	sort.Strings(want)
+
+	var got []string
+	pages := 0
+	for target := fmt.Sprintf("/v2/_catalog?n=%d", catalogPageSize); target != ""; {
+		pages++
+		if pages > len(want) {
+			t.Fatal("pagination did not terminate")
+		}
+		names, next := catalogPage(t, f.get(t, "catalog-carol", target))
+		for _, name := range names {
+			if strings.HasSuffix(name, catalogHiddenSuffix) {
+				t.Fatalf("page %d names hidden content %q", pages, name)
+			}
+		}
+		got = append(got, names...)
+		if next == "" {
+			break
+		}
+		if len(names) != catalogPageSize {
+			t.Fatalf("page %d holds %d names, want %d: a short page leaks a filtered count",
+				pages, len(names), catalogPageSize)
+		}
+		if strings.Contains(next, catalogHiddenSuffix) {
+			t.Fatalf("cursor %q names hidden content", next)
+		}
+		target = next
+	}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("catalog = %v, want exactly %v", got, want)
+	}
+}
+
+// TestCatalogSurfaceListsCachedContentAtAll is the positive half, and it is
+// here rather than in the store suite because a leak is only interesting if
+// the feature works: a handler that returned nothing for proxied content would
+// pass every assertion above while making the union pointless.
+func TestCatalogSurfaceListsCachedContentAtAll(t *testing.T) {
+	t.Parallel()
+	f := catalogCachedFixture(t)
+
+	names, _ := catalogPage(t, f.get(t, "catalog-carol", "/v2/_catalog?n=100"))
+	for _, want := range catalogCachedVisible {
+		if !slices.Contains(names, want) {
+			t.Errorf("catalog = %v, want it to include cached content %q", names, want)
+		}
 	}
 }

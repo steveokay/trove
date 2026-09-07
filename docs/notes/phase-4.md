@@ -1050,3 +1050,49 @@ CI green on dee5ca7 (run 34159076846).
 `internal/proxyserve/clients.go` at 100%. The new serve helpers carry the same
 uncovered construction-error and S3-driver branches the file's existing
 `openHostedBlobStore` does; the package is unchanged in character.
+
+## C-021 — Catalog over cached content
+
+The first half of what was one blocked task. The decision behind it is recorded
+as a clarification on ADR 0008; this note is about what building it turned up.
+
+**The union is one query, not two.** `ListContentNames` now reads `manifests`
+and `cached_manifests` as a union rather than the hosted table alone. Three
+details that are not obvious and are each a bug if got wrong:
+
+- the union is **wrapped in a subquery**, because ORDER BY and LIMIT have to
+  apply to the merged result and neither engine accepts them on the branches.
+  This is the same shape C-013 needed for `ListEvictable`, for the same reason;
+- **`UNION`, not `UNION ALL`.** A name can hold hosted and cached content at
+  once only if an entity changed type, which nothing supports today — but the
+  two tables have no constraint tying them together, and a catalog that listed
+  a name twice would page it twice. There is a contract case for it;
+- **the same visibility clause guards both halves**, built once and bound
+  twice. On Postgres that means renumbering the second copy's placeholders,
+  which is the fiddliest part of the change and the reason the clause is built
+  by the shared helper rather than written out.
+
+**A leak here would have been invisible to an unrestricted subject**, which is
+why the disclosure suite gained a walk rather than the store suite gaining
+another assertion. An implementation that filtered only the hosted branch
+returns exactly the right names to an admin and leaks only to a scoped subject,
+through the pages, counts and cursors ADR 0003 names. The test was verified the
+way this repo verifies its guard tests — by injecting the unfiltered branch and
+watching it fail — rather than by being written and believed.
+
+**A consequence worth stating, because it will look like a bug:** a proxy's
+catalog changes without anybody pushing anything, since eviction removes names.
+That is the honest answer for a cache. The alternative — reporting what the
+upstream offers — is not merely more expensive, it is close to unbuildable:
+Docker Hub, ghcr.io and quay.io do not implement `/v2/_catalog` at all, so the
+five upstreams C-014 ships presets for would contribute nothing while a listing
+grew an outbound call and a disclosure surface.
+
+**The group half became C-024**, and the split is about mechanism rather than
+size. A group's content is pullable under the *group's* name — `fleet/app` for
+member content `internal/app` — which is not a row in any table but a rewrite,
+and group membership lives in a package `internal/meta` may not import. So it
+cannot be another branch of this query; it is a k-way keyset merge in the
+handler, over a seam that has to run `registry` → `groupserve` even though the
+package dependency runs the other way. Doing it here would have meant
+smuggling a second, unrelated design into a query change.

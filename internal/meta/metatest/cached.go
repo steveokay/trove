@@ -2,6 +2,8 @@ package metatest
 
 import (
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -659,5 +661,95 @@ func testNegativeEntriesDieWithTheRepository(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetNegativeEntry(ctx(), "dockerhub2/library/nginx", "typo"); err != nil {
 		t.Errorf("GetNegativeEntry for the neighbour: %v, want it untouched", err)
+	}
+}
+
+// The catalog is the union of hosted and cached content (C-021, ADR 0008
+// clarification). A proxy contributes what it has actually cached, which is
+// also why these cases live beside the cached-content contract rather than
+// with the hosted listing ones: the union is a property of both halves, and an
+// engine that implements one and forgets the other fails here.
+
+func testListContentNamesIncludesCachedContent(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "team-a", meta.Hosted)
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	mustSeedContent(t, s, "team-a/api")
+	mustPutCachedManifest(t, s, "dockerhub/library/nginx", digest("cached-nginx"))
+	mustPutCachedManifest(t, s, "dockerhub/library/redis", digest("cached-redis"))
+
+	// An entity that has cached nothing contributes nothing: a proxy's catalog
+	// is what it holds, not what its upstream offers.
+	mustCreateRepo(t, s, "quay", meta.Proxy)
+
+	got := contentNames(t, s, meta.Unrestricted(), 0)
+	want := []string{"dockerhub/library/nginx", "dockerhub/library/redis", "team-a/api"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("names = %v, want %v", got, want)
+	}
+}
+
+// testListContentNamesFiltersCachedContent: the visibility filter guards both
+// halves of the union. A proxy the subject cannot see must be as absent from
+// the catalog as a hosted repository is -- the disclosure rule does not care
+// which table a name came out of (ADR 0003).
+func testListContentNamesFiltersCachedContent(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "team-a", meta.Hosted)
+	mustCreateRepo(t, s, "dockerhub", meta.Proxy)
+	mustCreateRepo(t, s, "secret", meta.Proxy)
+	mustSeedContent(t, s, "team-a/api")
+	mustPutCachedManifest(t, s, "dockerhub/library/nginx", digest("cached-nginx"))
+	mustPutCachedManifest(t, s, "secret/internal/tool", digest("cached-secret"))
+
+	got := contentNames(t, s, meta.VisibleTo(meta.ScopeFilter{Prefix: "team-a/"}, meta.ScopeFilter{Prefix: "dockerhub/"}), 0)
+	want := []string{"dockerhub/library/nginx", "team-a/api"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("names = %v, want %v -- a cached name leaked past the filter", got, want)
+	}
+}
+
+// testListContentNamesPaginateAcrossTheUnion is the case a union most easily
+// gets wrong. Hosted and cached names interleave lexically, so a page boundary
+// falls in the middle of the merge; an implementation that paged each half
+// separately, or that applied the cursor to only one of them, returns
+// duplicates or drops names here. Hidden names are interleaved too, so a
+// cursor that names one is caught by contentNames as it walks.
+func testListContentNamesPaginateAcrossTheUnion(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "a", meta.Hosted)
+	mustCreateRepo(t, s, "b", meta.Proxy)
+	mustCreateRepo(t, s, "hidden", meta.Proxy)
+
+	// Interleaved by name: a/1 b/1 a/2 b/2 ... with hidden/N between them.
+	var want []string
+	for i := 1; i <= 5; i++ {
+		hosted := fmt.Sprintf("a/%d", i)
+		cached := fmt.Sprintf("b/%d", i)
+		mustSeedContent(t, s, hosted)
+		mustPutCachedManifest(t, s, cached, digest(cached))
+		mustPutCachedManifest(t, s, fmt.Sprintf("hidden/%d", i), digest("hidden"+cached))
+		want = append(want, hosted, cached)
+	}
+	sort.Strings(want)
+
+	for _, limit := range []int{1, 2, 3, 7} {
+		got := contentNames(t, s, meta.VisibleTo(meta.ScopeFilter{Prefix: "a/"}, meta.ScopeFilter{Prefix: "b/"}), limit)
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("limit %d: names = %v, want %v", limit, got, want)
+		}
+	}
+}
+
+// testListContentNamesListsANameHoldingBothKindsOnce. A name cannot normally
+// hold hosted and cached content at once -- the entity is one type -- but the
+// two tables have no constraint tying them together, so a converted or
+// half-migrated entity can produce it. The catalog is a set of names, and a
+// client that saw one twice would page it twice.
+func testListContentNamesListsANameHoldingBothKindsOnce(t *testing.T, s meta.Store) {
+	mustCreateRepo(t, s, "both", meta.Proxy)
+	mustPutCachedManifest(t, s, "both/thing", digest("cached-thing"))
+	mustSeedContent(t, s, "both/thing")
+
+	got := contentNames(t, s, meta.Unrestricted(), 0)
+	if fmt.Sprint(got) != fmt.Sprint([]string{"both/thing"}) {
+		t.Errorf("names = %v, want the name exactly once", got)
 	}
 }

@@ -872,18 +872,33 @@ func (s *Store) ListContentNames(ctx context.Context, opts meta.ListOptions) (me
 		return meta.ContentNamePage{}, err
 	}
 
-	names := make([]string, 0, len(s.manifests))
-	for name, manifests := range s.manifests {
-		// An emptied map is a repository whose last manifest was deleted: it
-		// holds no content, so it names nothing to pull and is not listed.
-		if len(manifests) == 0 {
-			continue
+	// Hosted and cached content are one union (C-021): a proxy contributes the
+	// names it holds, and a name holding both kinds is listed once.
+	seen := make(map[string]struct{}, len(s.manifests)+len(s.cachedManifests))
+	names := make([]string, 0, len(s.manifests)+len(s.cachedManifests))
+	collect := func(name string, held int) {
+		// An emptied map is a repository whose last content was deleted or
+		// evicted: it holds nothing, so it names nothing to pull.
+		if held == 0 {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
 		}
 		// Filtering happens here, while building the result set -- never
-		// after (ADR 0003). Counts and cursors must reflect the filter.
+		// after (ADR 0003). Counts and cursors must reflect the filter. The
+		// cached half is guarded by the same check for the same reason: which
+		// table a name came out of is not a disclosure rule.
 		if opts.Visibility.Allows(name) && name > opts.Cursor {
+			seen[name] = struct{}{}
 			names = append(names, name)
 		}
+	}
+	for name, manifests := range s.manifests {
+		collect(name, len(manifests))
+	}
+	for name, manifests := range s.cachedManifests {
+		collect(name, len(manifests))
 	}
 	sort.Strings(names)
 

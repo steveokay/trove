@@ -342,13 +342,32 @@ func (s *Store) ListContentNames(ctx context.Context, opts meta.ListOptions) (me
 		return meta.ContentNamePage{}, err
 	}
 
-	where, args := sqlutil.VisibilityClause("repo_name", opts.Visibility, sqlutil.Question, 1)
+	// The same clause guards both halves of the union, because the same rule
+	// guards both kinds of content: a name the subject cannot see must not
+	// appear from the cached side either. Building it once and binding its
+	// arguments twice is what keeps that true by construction.
+	where, clauseArgs := sqlutil.VisibilityClause("repo_name", opts.Visibility, sqlutil.Question, 1)
 	limit := opts.EffectiveLimit()
+
+	args := make([]any, 0, 2*len(clauseArgs)+3)
+	args = append(args, clauseArgs...)
+	args = append(args, opts.Cursor)
+	args = append(args, clauseArgs...)
 	args = append(args, opts.Cursor, limit+1)
 
+	// The union is wrapped in a subquery: ORDER BY and LIMIT here apply to the
+	// merged result, and neither engine accepts them on the branches. UNION
+	// (not UNION ALL) is doing the de-duplication -- a name can hold hosted
+	// content and cached content at once only if an entity changed type, but
+	// the catalog must not say it twice if it does.
 	names, err := sqlutil.Collect(ctx, s.db,
-		`SELECT DISTINCT repo_name FROM manifests
-		 WHERE `+where+` AND repo_name > ? ORDER BY repo_name LIMIT ?`,
+		`SELECT name FROM (
+		     SELECT DISTINCT repo_name AS name FROM manifests
+		      WHERE `+where+` AND repo_name > ?
+		     UNION
+		     SELECT DISTINCT repo_name AS name FROM cached_manifests
+		      WHERE `+where+` AND repo_name > ?
+		 ) ORDER BY name LIMIT ?`,
 		args,
 		func(rows *sql.Rows) (string, error) {
 			var name string

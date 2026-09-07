@@ -301,15 +301,24 @@ type ContentStore interface {
 	// question -- which entities exist -- and the two are deliberately
 	// separate methods rather than one with a flag.
 	//
-	// Only hosted content is enumerated. Cached proxy content has rows of its
-	// own since C-004 and is still not listed here: what a proxy's catalog
-	// should report -- everything it happens to have cached, which is a
-	// function of eviction and therefore changes without anybody pushing
-	// anything, or nothing at all -- is a decision that belongs with the task
-	// that serves proxy pulls, and answering it here first would settle it by
-	// accident. A group contributes the union of the members its subject may
-	// read (C-012). Neither is reachable from this method, which is what keeps
-	// it a query over one table.
+	// Hosted and cached content are both enumerated, as one union (C-021,
+	// ADR 0008 clarification). A proxy contributes the names it has actually
+	// cached and a proxy that has served nothing contributes nothing, which is
+	// what the catalog means for a proxy: asking the upstream was rejected
+	// because the registries trove ships presets for do not implement
+	// /v2/_catalog at all, so proxying it would return nothing while adding an
+	// outbound call and a disclosure surface to a listing.
+	//
+	// A consequence worth stating: a proxy's catalog changes without anybody
+	// pushing anything, because eviction removes names. That is honest rather
+	// than surprising -- the catalog says what is here now, and for a cache
+	// that is a moving answer.
+	//
+	// Groups are still not reachable from here, and cannot be: a group's
+	// content is pullable under the *group's* name, which is not a row in any
+	// table but a rewrite of its members' names, and membership lives in a
+	// package this one may not import. The catalog handler unions that in
+	// (C-021), which is what keeps this a query over tables.
 	//
 	// The visibility is applied inside the query. A name the subject cannot
 	// see must not appear in a page, in a count, or in a NextCursor -- a
