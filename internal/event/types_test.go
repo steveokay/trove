@@ -246,12 +246,12 @@ func fixtures() map[Type]Event {
 			Resource: "01K4GCRUN000000000000000A",
 			At:       fixtureTime,
 			Payload: GCCompletedPayload{
-				RunID:            "01K4GCRUN000000000000000A",
-				ManifestsScanned: 1842,
-				BlobsDeleted:     37,
-				BytesReclaimed:   912457728,
-				DurationSeconds:  94,
-				Resumed:          true,
+				RunID:           "01K4GCRUN000000000000000A",
+				BlobsScanned:    1842,
+				BlobsDeleted:    37,
+				BytesReclaimed:  912457728,
+				DurationSeconds: 94,
+				Resumed:         true,
 			},
 		},
 		BlobCorrupt: {

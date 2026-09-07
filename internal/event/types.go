@@ -398,11 +398,18 @@ func (QuotaExceededPayload) EventType() Type { return QuotaExceeded }
 
 // GCCompletedPayload describes a finished garbage-collection sweep.
 type GCCompletedPayload struct {
-	RunID            string `json:"run_id"`
-	ManifestsScanned int64  `json:"manifests_scanned"`
-	BlobsDeleted     int64  `json:"blobs_deleted"`
-	BytesReclaimed   int64  `json:"bytes_reclaimed"`
-	DurationSeconds  int64  `json:"duration_seconds"`
+	RunID string `json:"run_id"`
+	// BlobsScanned is how many blobs the sweep considered.
+	//
+	// It counted manifests when this payload was written, because the design
+	// then walked them to build a mark set. P-007 evaluates reachability as a
+	// predicate inside the candidate query instead (ADR 0010's clarification),
+	// so no manifest is ever "scanned" and a field saying otherwise would
+	// report a number nothing measures.
+	BlobsScanned    int64 `json:"blobs_scanned"`
+	BlobsDeleted    int64 `json:"blobs_deleted"`
+	BytesReclaimed  int64 `json:"bytes_reclaimed"`
+	DurationSeconds int64 `json:"duration_seconds"`
 	// Resumed marks a sweep that picked up an interrupted run rather than
 	// starting one (§7).
 	Resumed bool `json:"resumed"`

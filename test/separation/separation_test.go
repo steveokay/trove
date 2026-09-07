@@ -38,6 +38,7 @@ import (
 	"github.com/steveokay/trove/internal/blob"
 	blobfs "github.com/steveokay/trove/internal/blob/fs"
 	"github.com/steveokay/trove/internal/cache"
+	"github.com/steveokay/trove/internal/gc"
 	"github.com/steveokay/trove/internal/meta"
 	metamemory "github.com/steveokay/trove/internal/meta/memory"
 	"github.com/steveokay/trove/internal/policy"
@@ -296,6 +297,80 @@ func TestRetentionPlansOverBothFamiliesSelectOnlyHosted(t *testing.T) {
 	}
 	if _, err := f.cacheBlobs.Stat(ctx, f.layer); err != nil {
 		t.Errorf("the cached bytes went missing during a retention evaluation: %v", err)
+	}
+}
+
+// TestGCSweepsOnlyTheHostedFamily is assertion (d) from the other side, and it
+// could not be written until P-007 existed: a garbage-collection sweep over
+// the same fixture removes the hosted blob and leaves every cached row and
+// every cached byte untouched -- with the two families holding the same
+// digests, so nothing here passes by telling them apart.
+//
+// The eviction test above proves a cache sweep cannot reach hosted content.
+// This proves the converse. Together they are the pair ADR 0009 exists for,
+// and the fact that each is written against a different package's collector,
+// over one fixture, is the point: neither could have been written against a
+// shared deletion engine.
+func TestGCSweepsOnlyTheHostedFamily(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// The hosted manifest goes first, which is what makes its layer
+	// unreferenced -- deleting a manifest removes rows immediately and leaves
+	// the bytes to GC (Q16).
+	if err := f.meta.DeleteManifest(ctx, hostedRepo, meta.Digest(f.manifest)); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+
+	// Constructed with the hosted store and the hosted-rooted blob store, and
+	// with no argument through which the cached halves could arrive.
+	collector, err := gc.New(gc.Options{
+		Meta:  f.meta,
+		Blobs: f.hostedBlobs,
+		// Everything in the fixture was created at evaluatedAt, so a clock an
+		// hour later with no grace makes it all collectable. The grace window
+		// has its own tests; this one is about which family is reachable.
+		Grace: 0,
+		Now:   func() time.Time { return evaluatedAt.Add(48 * time.Hour) },
+		NewID: func() string { return "separation-run" },
+		Log:   quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("gc.New: %v", err)
+	}
+
+	result, err := collector.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Deleted != 1 {
+		t.Fatalf("swept %d blobs, want the one hosted layer", result.Deleted)
+	}
+
+	// The hosted layer is gone, rows and bytes.
+	if _, err := f.meta.GetBlob(ctx, meta.Digest(f.layer)); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("the hosted blob row survived: %v", err)
+	}
+	if _, err := f.hostedBlobs.Stat(ctx, f.layer); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("the hosted bytes survived: %v", err)
+	}
+
+	// And the cached family is exactly as it was -- same digests, other
+	// tables, other root.
+	if _, err := f.meta.GetCachedManifest(ctx, cachedRepo, meta.Digest(f.manifest)); err != nil {
+		t.Errorf("a GC sweep removed a cached manifest: %v", err)
+	}
+	if _, err := f.meta.GetCachedBlob(ctx, cachedRepo, meta.Digest(f.layer)); err != nil {
+		t.Errorf("a GC sweep removed a cached blob row: %v", err)
+	}
+	desc, err := f.cacheBlobs.Stat(ctx, f.layer)
+	if err != nil {
+		t.Fatalf("a GC sweep removed cached bytes: %v", err)
+	}
+	if desc.Digest != f.layer {
+		t.Errorf("cached bytes changed identity: %s", desc.Digest)
 	}
 }
 

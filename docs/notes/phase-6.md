@@ -83,3 +83,62 @@ resume order, and refusals behave the same everywhere.
 deletes rows then bytes, persists the cursor, emits `gc.completed`, and takes
 `blob.HostedRef` (the newtype C-013 introduced with its cached twin). P-008's
 race matrix follows it.
+
+## P-007 (part 2) — the collector
+
+`internal/gc` is the one place in trove that deletes something nothing can
+recreate, and everything about it is arranged so its mistakes fall on the safe
+side.
+
+**Rows before bytes, and a leak is the accepted failure.** The metadata row
+goes first, in a transaction that re-checks every condition; the bytes follow.
+A crash or a storage failure between the two leaves unreferenced bytes on disk,
+counted as `Leaked` in the result and logged — reclaimed later by `trove verify`
+(P-012). The reverse order would produce a row whose content is missing, which
+is the one corruption class this registry refuses to create. The test that pins
+this makes the blob store refuse the delete and asserts the row is gone, the
+bytes are not, and the sweep returns no error.
+
+**Interrupted and failed are different stops.** A cancelled sweep saves its
+cursor and leaves the run *open*, so the next one resumes it; a store failure
+closes the run with the reason, so an operator sees that collection is failing
+rather than an unfinished row that reads like a shutdown. Restarting after a
+failure costs almost nothing — the blobs already deleted are gone from the
+candidate set, so a restart re-lists rather than re-deletes. **The tests found
+this**: the first implementation closed the run on cancellation too, which made
+"resumable" a comment rather than a behaviour, and two cases failed until the
+code matched its own doc.
+
+**A resumed sweep keeps its original deadline**, which is the whole reason
+resuming is safe. `TestResumeKeepsTheOriginalWindow` uploads a blob *after* a
+run begins, advances the clock past the grace window, resumes, and asserts the
+blob survives — a fresh run would have collected it, and an interruption must
+not silently widen what a sweep may delete.
+
+**The re-check refusing is not an error.** A candidate that something started
+referencing between the listing and the delete is counted as `Skipped`. So is
+one whose re-check could not be answered at all: an unknown answer is not a
+licence to delete. Both leave the blob completely intact, rows and bytes, which
+is what the tests assert rather than just checking a counter.
+
+**`blob.HostedRef` found its consumer.** C-013 introduced the newtype pair with
+its cached twin and said the first deleting caller on each side would use them;
+`gc.reclaim` is that caller, and it is the only function in trove that removes
+content from the hosted blob store. A cached digest cannot be converted into a
+`HostedRef`, and `internal/cache` cannot import this package at all (archtest).
+
+**ADR 0009's proving test gained its other half.** `test/separation` could
+previously only show that a cache sweep cannot reach hosted content; with a
+collector to run, it now shows the converse over the same fixture — the same
+digests in both families, the hosted layer swept, every cached row and byte
+untouched. Neither test could have been written against a shared deletion
+engine, which is the argument the ADR makes.
+
+**One event-payload correction.** `event.GCCompletedPayload` had
+`manifests_scanned`, written when the design walked manifests to build a mark
+set. Nothing walks manifests now — reachability is a predicate — so the field
+would have reported a number nothing measures. It is `blobs_scanned`, with the
+golden updated; no consumer exists yet (webhooks are E-002+), so the wire
+format was still free to be honest.
+
+Coverage: `internal/gc` 100%.
