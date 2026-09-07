@@ -1045,6 +1045,8 @@ questions rather than being guessed at here.
 makes zero outbound requests, because every preset stays disabled until an
 operator creates a repository from one.
 
+CI green on dee5ca7 (run 34159076846).
+
 `internal/proxyserve/clients.go` at 100%. The new serve helpers carry the same
 uncovered construction-error and S3-driver branches the file's existing
 `openHostedBlobStore` does; the package is unchanged in character.
